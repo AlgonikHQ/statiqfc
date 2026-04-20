@@ -30,7 +30,6 @@ logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
 log = logging.getLogger(__name__)
 
 _vip_announced = False  # prevent repeat VIP announcements
-_no_alert_date  = None   # track date no-alert card was last sent
 
 # ── Private-only card templates ───────────────────────────────
 
@@ -110,14 +109,14 @@ def run_daily_digest():
         conn  = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         rows  = conn.execute(
-            "SELECT * FROM fixtures WHERE kickoff_utc LIKE ? AND status IN ('SCHEDULED','TIMED') ORDER BY league, kickoff_utc",
+            "SELECT * FROM fixtures WHERE kickoff_utc LIKE ? AND status IN ('SCHEDULED','TIMED') ORDER BY kickoff_utc",
             (today + "%",)
         ).fetchall()
         conn.close()
         fixtures = [dict(r) for r in rows]
         if fixtures:
             send_public_buttons(card_daily_digest(fixtures), buttons_digest())
-        log.info(f"Daily digest: {len(fixtures)} fixtures across all leagues")
+        log.info(f"Daily digest: {len(fixtures)} fixtures")
     except Exception as e:
         send_private(_private_error_card("run_daily_digest", e))
 
@@ -149,10 +148,7 @@ def run_edge_scan():
         edges = scan_today(upcoming)
 
         if not edges:
-            global _no_alert_date
-            today = datetime.utcnow().date()
-            if count_today_alerts() == 0 and _no_alert_date != today:
-                _no_alert_date = today
+            if count_today_alerts() == 0:
                 send_public_buttons(card_no_alert(), buttons_digest())
             return
 

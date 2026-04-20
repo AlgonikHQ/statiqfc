@@ -10,7 +10,7 @@ import re
 import time
 import logging
 from datetime import datetime, timedelta
-from config import FD_API_KEY, FD_BASE_URL, LEAGUE_CODE, LEAGUE_CODES, ODDS_API_KEY, ODDS_SPORT, ODDS_REGION, ODDS_MARKET, DB_PATH, LOG_PATH
+from config import FD_API_KEY, FD_BASE_URL, LEAGUE_CODE, ODDS_API_KEY, ODDS_SPORT, ODDS_REGION, ODDS_MARKET, DB_PATH, LOG_PATH
 
 logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
                     format="%(asctime)s [FETCHER] %(message)s")
@@ -62,78 +62,70 @@ def _db():
 # ── Fixtures & Results ───────────────────────────────────────
 
 def fetch_fixtures(days_ahead=7):
-    """Pull upcoming fixtures for all configured leagues."""
+    """Pull upcoming PL fixtures for the next N days."""
     date_from = datetime.utcnow().strftime("%Y-%m-%d")
     date_to   = (datetime.utcnow() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
-    total = 0
-    for league in LEAGUE_CODES:
-        data = _get(
-            f"{FD_BASE_URL}/competitions/{league}/matches",
-            headers=FD_HEADERS,
-            params={"dateFrom": date_from, "dateTo": date_to, "status": "SCHEDULED"},
-            label=f"fixtures-{league}"
-        )
-        if not data:
-            continue
-        conn = _db()
-        for m in data.get("matches", []):
-            conn.execute("""
-                INSERT OR REPLACE INTO fixtures
-                (fixture_id, home, away, kickoff_utc, league, status, updated_at)
-                VALUES (?,?,?,?,?,?,?)
-            """, (
-                str(m["id"]),
-                m["homeTeam"]["shortName"],
-                m["awayTeam"]["shortName"],
-                m["utcDate"],
-                league,
-                m["status"],
-                datetime.utcnow().isoformat()
-            ))
-        conn.commit()
-        conn.close()
-        count = len(data.get("matches", []))
-        total += count
-        log.info(f"Fixtures cached [{league}]: {count} matches")
-        time.sleep(0.5)  # stay within free tier rate limit
-    log.info(f"Total fixtures cached: {total} across {len(LEAGUE_CODES)} leagues")
+    data = _get(
+        f"{FD_BASE_URL}/competitions/{LEAGUE_CODE}/matches",
+        headers=FD_HEADERS,
+        params={"dateFrom": date_from, "dateTo": date_to, "status": "SCHEDULED"},
+        label="fixtures"
+    )
+    if not data:
+        return
+    conn = _db()
+    for m in data.get("matches", []):
+        conn.execute("""
+            INSERT OR REPLACE INTO fixtures
+            (fixture_id, home, away, kickoff_utc, league, status, updated_at)
+            VALUES (?,?,?,?,?,?,?)
+        """, (
+            str(m["id"]),
+            m["homeTeam"]["shortName"],
+            m["awayTeam"]["shortName"],
+            m["utcDate"],
+            LEAGUE_CODE,
+            m["status"],
+            datetime.utcnow().isoformat()
+        ))
+    conn.commit()
+    conn.close()
+    log.info(f"Fixtures cached: {len(data.get('matches',[]))} matches")
 
 def fetch_results(days_back=3):
-    """Pull recent results for all configured leagues."""
+    """Pull recent results and update fixture table."""
     date_from = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y-%m-%d")
     date_to   = datetime.utcnow().strftime("%Y-%m-%d")
-    all_finished = []
-    for league in LEAGUE_CODES:
-        data = _get(
-            f"{FD_BASE_URL}/competitions/{league}/matches",
-            headers=FD_HEADERS,
-            params={"dateFrom": date_from, "dateTo": date_to, "status": "FINISHED"},
-            label=f"results-{league}"
-        )
-        if not data:
-            continue
-        conn = _db()
-        for m in data.get("matches", []):
-            conn.execute("""
-                UPDATE fixtures SET status='FINISHED', home_score=?, away_score=?, updated_at=?
-                WHERE fixture_id=?
-            """, (
-                m["score"]["fullTime"]["home"],
-                m["score"]["fullTime"]["away"],
-                datetime.utcnow().isoformat(),
-                str(m["id"])
-            ))
-            all_finished.append({
-                "fixture_id": str(m["id"]),
-                "home":       m["homeTeam"]["shortName"],
-                "away":       m["awayTeam"]["shortName"],
-                "home_score": m["score"]["fullTime"]["home"],
-                "away_score": m["score"]["fullTime"]["away"]
-            })
-        conn.commit()
-        conn.close()
-        time.sleep(0.5)
-    return all_finished
+    data = _get(
+        f"{FD_BASE_URL}/competitions/{LEAGUE_CODE}/matches",
+        headers=FD_HEADERS,
+        params={"dateFrom": date_from, "dateTo": date_to, "status": "FINISHED"},
+        label="results"
+    )
+    if not data:
+        return []
+    conn = _db()
+    finished = []
+    for m in data.get("matches", []):
+        conn.execute("""
+            UPDATE fixtures SET status='FINISHED', home_score=?, away_score=?, updated_at=?
+            WHERE fixture_id=?
+        """, (
+            m["score"]["fullTime"]["home"],
+            m["score"]["fullTime"]["away"],
+            datetime.utcnow().isoformat(),
+            str(m["id"])
+        ))
+        finished.append({
+            "fixture_id": str(m["id"]),
+            "home": m["homeTeam"]["shortName"],
+            "away": m["awayTeam"]["shortName"],
+            "home_score": m["score"]["fullTime"]["home"],
+            "away_score": m["score"]["fullTime"]["away"]
+        })
+    conn.commit()
+    conn.close()
+    return finished
 
 # ── Team Form ─────────────────────────────────────────────────
 

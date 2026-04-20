@@ -66,18 +66,6 @@ def buttons_vip():
     ]
 
 
-
-LEAGUE_LABELS = {
-    "PL":  "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League",
-    "BL1": "🇩🇪 Bundesliga",
-    "SA":  "🇮🇹 Serie A",
-    "FL1": "🇫🇷 Ligue 1",
-    "PD":  "🇪🇸 La Liga",
-    "CL":  "⭐ Champions League",
-    "EC":  "🌍 European Championship",
-    "WC":  "🌎 World Cup",
-}
-
 DISCLAIMER = "\n\n⚠️ Paper portfolio only. No financial advice. 18+ Gamble responsibly."
 FOOTER     = "\n\n⚙️ StatiqFC {version} | data: football-data.org"
 
@@ -95,20 +83,12 @@ def _form_emoji(wdl_list):
 # ── Daily digest ──────────────────────────────────────────────
 
 def card_daily_digest(fixtures):
-    """Morning fixture card — grouped by league."""
-    from collections import defaultdict
-    by_league = defaultdict(list)
+    """Morning fixture card — sent at 8am."""
+    lines = ["📋 *Today's Premier League Fixtures*\n"]
     for f in fixtures:
-        by_league[f.get("league", "PL")].append(f)
-
-    lines = ["📋 *Today's Fixtures*\n"]
-    for league_code, league_fixtures in sorted(by_league.items()):
-        label = LEAGUE_LABELS.get(league_code, league_code)
-        lines.append(f"\n{label}")
-        for f in league_fixtures:
-            ko = _ko_time(f["kickoff_utc"])
-            lines.append(f"  ⚽ {f['home']} vs {f['away']} — {ko}")
-    lines.append("\nEdge Alerts drop 2hrs before kick-off.")
+        ko = _ko_time(f["kickoff_utc"])
+        lines.append(f"⚽ {f['home']} vs {f['away']} — {ko}")
+    lines.append("\nAll stats-based Edge Alerts drop 2hrs before kick-off.")
     return "\n".join(lines)
 
 # ── Pre-match edge alert ──────────────────────────────────────
@@ -152,12 +132,9 @@ def card_edge_alert(edge, form_home, form_away, h2h_rows, odds, version):
             f"\n  ⏱️ Odds correct at time of alert — verify before placing"
         )
 
-    league_code  = edge.get("league", "PL")
-    league_label = LEAGUE_LABELS.get(league_code, league_code)
     msg = (
         f"{sel_type}\n"
         f"━━━━━━━━━━━━━━━━━\n"
-        f"🏆  {league_label}\n"
         f"🏟️  *{home} vs {away}*\n"
         f"⏰  Kick-off: {ko}\n\n"
         f"📌  *Market:* {market_label}\n"
