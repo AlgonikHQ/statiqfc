@@ -29,3 +29,4 @@ __pycache__/
 *.swp
 *~
 bot/config.py
+bot/*.bak*
