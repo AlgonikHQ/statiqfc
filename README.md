@@ -1,4 +1,4 @@
-# StatiqFC
+# StatIQFC
 
 Automated football edge detection bot for the Premier League.
 
