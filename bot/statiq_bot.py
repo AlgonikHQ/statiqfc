@@ -44,7 +44,7 @@ _last_reset_date  = None
 
 def _daily_reset():
     global _fixtures_scanned, _near_misses, _skip_sent, _last_reset_date
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     if _last_reset_date != today:
         _fixtures_scanned = 0
         _near_misses      = []
@@ -76,7 +76,7 @@ def startup():
         "\u2705 All systems operational\n"
         "\U0001f4e6 Version: " + BOT_VERSION + "\n"
         "\U0001f4cb " + PATCH_NOTES + "\n"
-        "\U0001f550 " + datetime.utcnow().strftime("%d %b %Y, %H:%M UTC") + "\n\n"
+        "\U0001f550 " + datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC") + "\n\n"
         "Alerts resume as scheduled."
     )
     log.info("Bot started — " + BOT_VERSION)
@@ -87,7 +87,7 @@ def startup():
 def run_daily_digest():
     _daily_reset()
     try:
-        today = datetime.utcnow().date().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         conn  = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         rows  = conn.execute(
