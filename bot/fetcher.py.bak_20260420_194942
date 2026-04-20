@@ -414,9 +414,4 @@ def nightly_refresh():
     fetch_fixtures(days_ahead=7)
     fetch_results(days_back=3)
     refresh_xg_all_teams()
-    try:
-        from apifootball import nightly_apifootball_refresh
-        nightly_apifootball_refresh()
-    except Exception as e:
-        log.warning(f"API-Football refresh error: {e}")
     log.info("Nightly cache refresh complete")
