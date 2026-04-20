@@ -1,0 +1,30 @@
+# StatiqFC — git ignore rules
+
+# Database (contains scraped data, not source)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# State & runtime files
+data/state.json
+data/roi.json
+
+# Logs
+*.log
+/var/log/statiq.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment
+.env
+*.env
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~

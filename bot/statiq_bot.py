@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+# ============================================================
+# statiq_bot.py — main entry point
+# Runs as: statiq.service on VPS
+# ============================================================
+
+import schedule
+import time
+import json
+import logging
+import sqlite3
+import traceback
+from datetime import datetime, timezone, timedelta
+
+from config import (DIGEST_TIME, CACHE_REFRESH_TIME, PRE_MATCH_HOURS,
+                    RESULT_CHECK_MINUTES, VIP_ROI_TARGET, VIP_MIN_SELECTIONS,
+                    BOT_VERSION, PATCH_NOTES, LOG_PATH, DB_PATH,
+                    STAKE_BUILDER, STAKE_STANDARD)
+from database  import (init_db, log_selection, settle_selection,
+                       get_pending_selections, get_latest_roi, refresh_roi,
+                       export_roi_json, count_today_alerts)
+from fetcher   import nightly_refresh, fetch_fixtures, fetch_results, fetch_h2h, fetch_odds
+from scanner   import scan_today
+from telegram_cards import (buttons_edge_alert, buttons_result, buttons_digest, buttons_weekly, buttons_vip, card_daily_digest, card_edge_alert, card_result,
+                             card_no_alert, card_weekly_digest, card_vip_unlock)
+from telegram import send_public, send_private, send_public_buttons
+
+logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
+                    format="%(asctime)s [MAIN] %(message)s")
+log = logging.getLogger(__name__)
+
+_vip_announced = False  # prevent repeat VIP announcements
+
+# ── Private-only card templates ───────────────────────────────
+
+def _private_startup_card():
+    return (
+        f"✅ *StatiqFC {BOT_VERSION} — ONLINE*\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"🟢 Service started successfully\n"
+        f"📡 Public channel: active\n"
+        f"🗓️ Scheduler: running\n"
+        f"📋 League: Premier League only\n"
+        f"💷 Stakes: £25 standard / £10 builder\n"
+        f"🎯 VIP target: +20% ROI over 50 selections\n\n"
+        f"_{PATCH_NOTES}_"
+    )
+
+def _private_stop_card(reason="manual"):
+    return (
+        f"🔴 *StatiqFC {BOT_VERSION} — OFFLINE*\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"Reason: {reason}\n"
+        f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+def _private_error_card(context, err):
+    return (
+        f"⚠️ *StatiqFC — Error*\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"Context: `{context}`\n"
+        f"Error: `{str(err)[:300]}`\n"
+        f"Time: {datetime.utcnow().strftime('%H:%M UTC')}"
+    )
+
+def _private_roi_summary(roi, label="Daily ROI Summary"):
+    if not roi:
+        return f"📊 *{label}*\nNo settled selections yet."
+    sign = lambda v: "+" if v >= 0 else ""
+    return (
+        f"📊 *{label}*\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"Selections: {roi['selections']}  (W{roi['wins']} L{roi['losses']} V{roi.get('voids',0)})\n"
+        f"Staked: £{roi['total_staked']}\n"
+        f"Returned: £{roi['total_return']}\n"
+        f"Net P&L: {sign(roi['net_pl'])}£{roi['net_pl']}\n"
+        f"ROI: {sign(roi['roi_pct'])}{roi['roi_pct']}%\n\n"
+        f"VIP target: +20% ROI / 50 sels\n"
+        f"Progress: {roi['selections']}/50 sels | {sign(roi['roi_pct'])}{roi['roi_pct']}% ROI"
+    )
+
+def _private_nightly_cache_card(ok):
+    status = "✅ Success" if ok else "❌ Failed — check fetcher logs"
+    return (
+        f"🔄 *Nightly cache refresh*\n"
+        f"Status: {status}\n"
+        f"Time: {datetime.utcnow().strftime('%H:%M UTC')}"
+    )
+
+# ── Startup ───────────────────────────────────────────────────
+
+def startup():
+    init_db()
+    try:
+        nightly_refresh()
+        send_private(_private_startup_card())
+        send_public(f"🔄 *StatiqFC {BOT_VERSION} — System Update*\n━━━━━━━━━━━━━━━━━\n✅ Bot restarted successfully\n📦 Version: {BOT_VERSION}\n📋 Patch: {PATCH_NOTES}\n🕐 Time: {datetime.utcnow().strftime('%d %b %Y, %H:%M UTC')}\n\nAll systems operational. Alerts resume as scheduled.")
+        cache_ok = True
+    except Exception as e:
+        cache_ok = False
+        send_private(_private_error_card("startup/nightly_refresh", e))
+    log.info(f"Bot started — {BOT_VERSION}")
+
+# ── Daily digest (public) ─────────────────────────────────────
+
+def run_daily_digest():
+    try:
+        today = datetime.utcnow().date().isoformat()
+        conn  = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows  = conn.execute(
+            "SELECT * FROM fixtures WHERE kickoff_utc LIKE ? AND status IN ('SCHEDULED','TIMED') ORDER BY kickoff_utc",
+            (today + "%",)
+        ).fetchall()
+        conn.close()
+        fixtures = [dict(r) for r in rows]
+        if fixtures:
+            send_public_buttons(card_daily_digest(fixtures), buttons_digest())
+        log.info(f"Daily digest: {len(fixtures)} fixtures")
+    except Exception as e:
+        send_private(_private_error_card("run_daily_digest", e))
+
+# ── Edge scan (public alerts) ─────────────────────────────────
+
+def run_edge_scan():
+    try:
+        now    = datetime.now(timezone.utc)
+        window = now + timedelta(hours=PRE_MATCH_HOURS + 0.5)
+        conn   = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows   = conn.execute(
+            "SELECT * FROM fixtures WHERE status IN ('SCHEDULED','TIMED') ORDER BY kickoff_utc"
+        ).fetchall()
+        conn.close()
+
+        upcoming = []
+        for r in rows:
+            try:
+                ko = datetime.fromisoformat(r["kickoff_utc"].replace("Z", "+00:00"))
+                if now < ko <= window:
+                    upcoming.append(dict(r))
+            except Exception:
+                continue
+
+        if not upcoming:
+            return
+
+        edges = scan_today(upcoming)
+
+        if not edges:
+            if count_today_alerts() == 0:
+                send_public_buttons(card_no_alert(), buttons_digest())
+            return
+
+        for edge in edges:
+            h2h_rows = fetch_h2h(edge["fixture_id"])
+            odds     = fetch_odds(edge["fixture_id"], edge["home"], edge["away"])
+
+            odds_val = None
+            if odds:
+                odds_val = {"BTTS": odds.get("btts_yes"),
+                            "OVER25": odds.get("over25"),
+                            "CS_HOME": odds.get("home")}.get(edge["market"])
+
+            display_odds = odds_val if odds_val else 1.80
+            stake        = STAKE_BUILDER if edge.get("is_builder") else STAKE_STANDARD
+            potential    = round(stake * display_odds, 2)
+            edge.update({"odds": display_odds, "stake": stake, "potential": potential})
+
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            fh = conn.execute("SELECT * FROM form WHERE team=?", (edge["home"],)).fetchone()
+            fa = conn.execute("SELECT * FROM form WHERE team=?", (edge["away"],)).fetchone()
+            conn.close()
+
+            def _to_form_dict(row):
+                if not row:
+                    return None
+                d = dict(row)
+                d["last5_list"] = json.loads(d.get("last5", "[]"))
+                return d
+
+            log_selection(edge["fixture_id"], edge["home"], edge["away"],
+                          edge["market"], display_odds,
+                          edge.get("is_builder", False), edge.get("reasoning", ""))
+
+            msg = card_edge_alert(edge, _to_form_dict(fh), _to_form_dict(fa),
+                                  h2h_rows, odds, BOT_VERSION)
+            send_public_buttons(msg, buttons_edge_alert(edge["home"], edge["away"]))
+            log.info(f"Alert: {edge['home']} vs {edge['away']} [{edge['market']}]")
+
+    except Exception as e:
+        send_private(_private_error_card("run_edge_scan", e))
+        log.error(traceback.format_exc())
+
+# ── Result checker (public result + private ROI) ──────────────
+
+def run_result_checker():
+    global _vip_announced
+    try:
+        finished     = fetch_results(days_back=1)
+        pending      = get_pending_selections()
+        if not pending:
+            return
+
+        finished_ids = {f["fixture_id"]: f for f in finished}
+
+        for sel in pending:
+            fid = sel["fixture_id"]
+            if fid not in finished_ids:
+                continue
+            rd  = finished_ids[fid]
+            hs  = rd["home_score"]
+            as_ = rd["away_score"]
+            market = sel["market"]
+
+            if market == "BTTS":
+                result = "WIN" if hs > 0 and as_ > 0 else "LOSS"
+            elif market == "CS_HOME":
+                result = "WIN" if as_ == 0 else "LOSS"
+            elif market == "OVER25":
+                result = "WIN" if (hs + as_) > 2 else "LOSS"
+            else:
+                result = "VOID"
+
+            settle_selection(sel["id"], result, hs, as_)
+            roi = get_latest_roi()
+            export_roi_json()
+
+            profit = round(sel["stake"] * sel["odds"] - sel["stake"], 2) if result == "WIN" else (-sel["stake"] if result == "LOSS" else 0)
+            sel_dict         = dict(sel)
+            sel_dict["result"] = result
+            sel_dict["profit"] = profit
+
+            # public: result card
+            send_public_buttons(card_result(sel_dict, roi), buttons_result())
+
+            # private: updated ROI after every result
+            send_private(_private_roi_summary(roi, label="ROI updated"))
+
+            log.info(f"Settled: {sel['home']} vs {sel['away']} [{market}] → {result}")
+
+            # VIP check
+            if (not _vip_announced and roi and
+                    roi["selections"] >= VIP_MIN_SELECTIONS and
+                    roi["roi_pct"] >= VIP_ROI_TARGET):
+                send_public_buttons(card_vip_unlock(roi), buttons_vip())
+                send_private(f"🏆 *VIP threshold hit!*\nROI: {roi['roi_pct']}% over {roi['selections']} selections.")
+                _vip_announced = True
+                log.info("VIP threshold reached")
+
+    except Exception as e:
+        send_private(_private_error_card("run_result_checker", e))
+        log.error(traceback.format_exc())
+
+# ── Nightly cache (private confirmation) ─────────────────────
+
+def run_nightly_refresh():
+    try:
+        nightly_refresh()
+        send_private(_private_nightly_cache_card(ok=True))
+    except Exception as e:
+        send_private(_private_nightly_cache_card(ok=False))
+        send_private(_private_error_card("nightly_refresh", e))
+
+# ── Daily ROI summary (private, 21:00 UTC) ───────────────────
+
+def run_daily_roi_summary():
+    roi = get_latest_roi()
+    send_private(_private_roi_summary(roi, label="Daily ROI Summary"))
+
+# ── Weekly digest (public Sunday 20:00 UTC) ───────────────────
+
+def run_weekly_digest():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM form").fetchall()
+        conn.close()
+        teams = [dict(r) for r in rows]
+        stats = {
+            "btts_leaders":    sorted(teams, key=lambda x: x.get("btts_rate", 0), reverse=True)[:5],
+            "cs_leaders":      sorted(teams, key=lambda x: x.get("cs_rate", 0), reverse=True)[:5],
+            "scoring_streaks": []
+        }
+        send_public(card_weekly_digest(stats, BOT_VERSION))
+        # also send full ROI to private after weekly
+        roi = get_latest_roi()
+        send_private(_private_roi_summary(roi, label="Weekly ROI Summary"))
+    except Exception as e:
+        send_private(_private_error_card("run_weekly_digest", e))
+
+# ── Schedule ──────────────────────────────────────────────────
+
+def main():
+    startup()
+
+    schedule.every().day.at(CACHE_REFRESH_TIME).do(run_nightly_refresh)
+    schedule.every().day.at(DIGEST_TIME).do(run_daily_digest)
+    schedule.every(30).minutes.do(run_edge_scan)
+    schedule.every(30).minutes.do(run_result_checker)
+    schedule.every().day.at("21:00").do(run_daily_roi_summary)
+    schedule.every().sunday.at("20:00").do(run_weekly_digest)
+
+    log.info("Scheduler running")
+    while True:
+        try:
+            schedule.run_pending()
+        except Exception as e:
+            send_private(_private_error_card("scheduler loop", e))
+            log.error(traceback.format_exc())
+        time.sleep(60)
+
+if __name__ == "__main__":
+    main()
