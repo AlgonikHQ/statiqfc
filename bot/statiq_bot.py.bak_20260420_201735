@@ -20,14 +20,14 @@ from database  import (init_db, log_selection, settle_selection,
                        get_pending_selections, get_latest_roi, refresh_roi,
                        export_roi_json, count_today_alerts)
 from fetcher   import nightly_refresh, fetch_fixtures, fetch_results, fetch_h2h, fetch_odds
-from scanner   import scan_today, score_btts, score_clean_sheet, score_over25
+from scanner   import scan_today
 from telegram_cards import (
     buttons_edge_alert, buttons_result, buttons_digest, buttons_weekly, buttons_vip,
     card_daily_digest, card_edge_alert, card_result, card_no_alerts_today,
     card_weekly_digest, card_vip_unlock, card_fixture_skip,
     card_private_startup, card_private_morning_briefing, card_private_alert_detail,
     card_private_near_misses, card_private_nightly_report, card_private_roi_summary,
-    card_private_error
+    card_private_error, _private_roi_summary
 )
 from telegram import send_public, send_private, send_public_buttons
 
@@ -35,12 +35,11 @@ logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
                     format="%(asctime)s [MAIN] %(message)s")
 log = logging.getLogger(__name__)
 
-_vip_announced    = False
-_fixtures_scanned = 0
-_near_misses      = []
-_skip_sent        = set()
-_last_reset_date  = None
-
+_vip_announced      = False
+_fixtures_scanned   = 0   # count fixtures scanned today for end-of-day card
+_near_misses        = []  # fixtures scoring 3/6 — reset daily
+_skip_sent          = set()  # fixture_ids that already got a skip card
+_last_reset_date    = None
 
 def _daily_reset():
     global _fixtures_scanned, _near_misses, _skip_sent, _last_reset_date
@@ -51,38 +50,30 @@ def _daily_reset():
         _skip_sent        = set()
         _last_reset_date  = today
 
-
-def _ko_time_safe(utc_str):
-    try:
-        dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
-        return dt.strftime("%H:%M UTC")
-    except Exception:
-        return utc_str
-
-
 # ── Startup ───────────────────────────────────────────────────
 
 def startup():
     init_db()
+    sources_ok = {"football-data.org": False, "Understat": False, "API-Football": False}
     try:
         nightly_refresh()
+        sources_ok = {"football-data.org": True, "Understat": True, "API-Football": True}
     except Exception as e:
         send_private(card_private_error("startup/nightly_refresh", e))
 
     send_private(card_private_startup(BOT_VERSION, PATCH_NOTES, LEAGUE_CODES))
     send_public(
-        "\U0001f504 *StatiqFC " + BOT_VERSION + " \u2014 Online*\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "\u2705 All systems operational\n"
-        "\U0001f4e6 Version: " + BOT_VERSION + "\n"
-        "\U0001f4cb " + PATCH_NOTES + "\n"
-        "\U0001f550 " + datetime.utcnow().strftime("%d %b %Y, %H:%M UTC") + "\n\n"
-        "Alerts resume as scheduled."
+        f"🔄 *StatiqFC {BOT_VERSION} — Online*\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"✅ All systems operational\n"
+        f"📦 Version: {BOT_VERSION}\n"
+        f"📋 {PATCH_NOTES}\n"
+        f"🕐 {datetime.utcnow().strftime(\"%d %b %Y, %H:%M UTC\")}\n\n"
+        f"Alerts resume as scheduled."
     )
-    log.info("Bot started — " + BOT_VERSION)
+    log.info(f"Bot started — {BOT_VERSION}")
 
-
-# ── Daily digest ──────────────────────────────────────────────
+# ── Daily digest (public + private briefing) ──────────────────
 
 def run_daily_digest():
     _daily_reset()
@@ -91,31 +82,35 @@ def run_daily_digest():
         conn  = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         rows  = conn.execute(
-            "SELECT * FROM fixtures WHERE kickoff_utc LIKE ? AND status IN ('SCHEDULED','TIMED') ORDER BY league, kickoff_utc",
+            "SELECT * FROM fixtures WHERE kickoff_utc LIKE ? AND status IN (\'SCHEDULED\',\'TIMED\') ORDER BY league, kickoff_utc",
             (today + "%",)
         ).fetchall()
         conn.close()
         fixtures = [dict(r) for r in rows]
+
         if fixtures:
+            # Public: fixture list
             send_public_buttons(card_daily_digest(fixtures), buttons_digest())
+            # Private: morning briefing with full fixture list
             send_private(card_private_morning_briefing(fixtures, BOT_VERSION))
-        log.info("Daily digest: " + str(len(fixtures)) + " fixtures")
+
+        log.info(f"Daily digest: {len(fixtures)} fixtures")
     except Exception as e:
         send_private(card_private_error("run_daily_digest", e))
-
 
 # ── Edge scan ─────────────────────────────────────────────────
 
 def run_edge_scan():
     global _fixtures_scanned, _near_misses, _skip_sent
     _daily_reset()
+
     try:
         now    = datetime.now(timezone.utc)
         window = now + timedelta(hours=PRE_MATCH_HOURS + 0.5)
         conn   = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         rows   = conn.execute(
-            "SELECT * FROM fixtures WHERE status IN ('SCHEDULED','TIMED') ORDER BY kickoff_utc"
+            "SELECT * FROM fixtures WHERE status IN (\'SCHEDULED\',\'TIMED\') ORDER BY kickoff_utc"
         ).fetchall()
         conn.close()
 
@@ -131,19 +126,24 @@ def run_edge_scan():
         if not upcoming:
             return
 
+        # Run scanner — returns only fixtures scoring >= MIN_SCORE_TO_ALERT
         edges = scan_today(upcoming)
 
+        # Also get ALL scored results for skip cards and near-misses
+        from scanner import score_btts, score_clean_sheet, score_over25
         for fix in upcoming:
             fid  = fix["fixture_id"]
             home = fix["home"]
             away = fix["away"]
             _fixtures_scanned += 1
 
+            # Check if this fixture got an edge alert
             fix_has_alert = any(e["fixture_id"] == fid for e in edges)
             if fix_has_alert:
                 continue
 
-            best_score  = 0
+            # Score it for near-miss/skip tracking
+            best_score = 0
             best_result = None
             for score_fn in [score_btts, score_clean_sheet, score_over25]:
                 result = score_fn(fid, home, away)
@@ -152,6 +152,7 @@ def run_edge_scan():
                     best_result = result
 
             if best_result:
+                # Near miss — scored 3/6
                 if best_result["score"] == MIN_SCORE_TO_ALERT - 1:
                     nm = {
                         "fixture_id": fid,
@@ -165,10 +166,14 @@ def run_edge_scan():
                     if not any(n["fixture_id"] == fid for n in _near_misses):
                         _near_misses.append(nm)
 
+                # Public skip card — only once per fixture
                 if fid not in _skip_sent:
                     _skip_sent.add(fid)
+                    # Find next fixture KO if any
+                    next_ko = None
                     remaining = [f for f in upcoming if f["fixture_id"] != fid]
-                    next_ko   = _ko_time_safe(remaining[0]["kickoff_utc"]) if remaining else None
+                    if remaining:
+                        next_ko = _ko_time_safe(remaining[0]["kickoff_utc"])
                     send_public(card_fixture_skip(
                         home, away,
                         fix.get("league", "PL"),
@@ -178,6 +183,7 @@ def run_edge_scan():
                         next_ko
                     ))
 
+        # Send edge alerts
         for edge in edges:
             h2h_rows = fetch_h2h(edge["fixture_id"])
             odds     = fetch_odds(edge["fixture_id"], edge["home"], edge["away"])
@@ -210,16 +216,26 @@ def run_edge_scan():
                           edge["market"], display_odds,
                           edge.get("is_builder", False), edge.get("reasoning", ""))
 
+            # Public alert
             msg = card_edge_alert(edge, _to_form_dict(fh), _to_form_dict(fa),
                                   h2h_rows, odds, BOT_VERSION)
             send_public_buttons(msg, buttons_edge_alert(edge["home"], edge["away"]))
+
+            # Private: full 6-layer breakdown
             send_private(card_private_alert_detail(edge, BOT_VERSION))
-            log.info("Alert: " + edge["home"] + " vs " + edge["away"] + " [" + edge["market"] + "] score " + str(edge.get("score_str")))
+
+            log.info(f"Alert: {edge[\'home\']} vs {edge[\'away\']} [{edge[\'market\']}] score {edge.get(\'score_str\')}") 
 
     except Exception as e:
         send_private(card_private_error("run_edge_scan", e))
         log.error(traceback.format_exc())
 
+def _ko_time_safe(utc_str):
+    try:
+        dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
+        return dt.strftime("%H:%M UTC")
+    except Exception:
+        return utc_str
 
 # ── End of day (21:00 UTC) ────────────────────────────────────
 
@@ -228,18 +244,24 @@ def run_end_of_day():
     _daily_reset()
     try:
         alerts_today = count_today_alerts()
+
+        # Public: only post no-alerts card if literally zero alerts sent today
         if alerts_today == 0 and _fixtures_scanned > 0:
             send_public_buttons(card_no_alerts_today(_fixtures_scanned), buttons_digest())
+
+        # Private: near-miss digest regardless
         if _near_misses:
             msg = card_private_near_misses(_near_misses, BOT_VERSION)
             if msg:
                 send_private(msg)
+
+        # Private: daily ROI
         roi = get_latest_roi()
         send_private(card_private_roi_summary(roi, label="Daily ROI Summary"))
-        log.info("End of day: " + str(alerts_today) + " alerts, " + str(len(_near_misses)) + " near-misses, " + str(_fixtures_scanned) + " scanned")
+
+        log.info(f"End of day: {alerts_today} alerts, {len(_near_misses)} near-misses, {_fixtures_scanned} scanned")
     except Exception as e:
         send_private(card_private_error("run_end_of_day", e))
-
 
 # ── Result checker ────────────────────────────────────────────
 
@@ -250,15 +272,18 @@ def run_result_checker():
         pending      = get_pending_selections()
         if not pending:
             return
+
         finished_ids = {f["fixture_id"]: f for f in finished}
+
         for sel in pending:
             fid = sel["fixture_id"]
             if fid not in finished_ids:
                 continue
-            rd     = finished_ids[fid]
-            hs     = rd["home_score"]
-            as_    = rd["away_score"]
+            rd  = finished_ids[fid]
+            hs  = rd["home_score"]
+            as_ = rd["away_score"]
             market = sel["market"]
+
             if market == "BTTS":
                 result = "WIN" if hs > 0 and as_ > 0 else "LOSS"
             elif market == "CS_HOME":
@@ -267,26 +292,31 @@ def run_result_checker():
                 result = "WIN" if (hs + as_) > 2 else "LOSS"
             else:
                 result = "VOID"
+
             settle_selection(sel["id"], result, hs, as_)
-            roi    = get_latest_roi()
+            roi = get_latest_roi()
             export_roi_json()
+
             profit = round(sel["stake"] * sel["odds"] - sel["stake"], 2) if result == "WIN" else (-sel["stake"] if result == "LOSS" else 0)
             sel_dict           = dict(sel)
             sel_dict["result"] = result
             sel_dict["profit"] = profit
+
             send_public_buttons(card_result(sel_dict, roi), buttons_result())
             send_private(card_private_roi_summary(roi, label="ROI updated"))
-            log.info("Settled: " + sel["home"] + " vs " + sel["away"] + " [" + market + "] -> " + result)
+
+            log.info(f"Settled: {sel[\'home\']} vs {sel[\'away\']} [{market}] → {result}")
+
             if (not _vip_announced and roi and
                     roi["selections"] >= VIP_MIN_SELECTIONS and
                     roi["roi_pct"] >= VIP_ROI_TARGET):
                 send_public_buttons(card_vip_unlock(roi), buttons_vip())
-                send_private("\U0001f3c6 *VIP threshold hit!*\nROI: " + str(roi["roi_pct"]) + "% over " + str(roi["selections"]) + " selections.")
+                send_private(f"🏆 *VIP threshold hit!*\nROI: {roi[\'roi_pct\']}% over {roi[\'selections\']} selections.")
                 _vip_announced = True
+
     except Exception as e:
         send_private(card_private_error("run_result_checker", e))
         log.error(traceback.format_exc())
-
 
 # ── Nightly refresh ───────────────────────────────────────────
 
@@ -299,19 +329,21 @@ def run_nightly_refresh():
     except Exception as e:
         ok = False
         send_private(card_private_error("nightly_refresh", e))
+
+    # Check API-Football budget
     api_budget = None
     try:
         import requests
         from config import API_FOOTBALL_KEY, API_FOOTBALL_URL
-        r = requests.get(API_FOOTBALL_URL + "/status",
+        r = requests.get(f"{API_FOOTBALL_URL}/status",
                          headers={"x-apisports-key": API_FOOTBALL_KEY}, timeout=10)
         if r.status_code == 200:
             data = r.json().get("response", {})
             api_budget = data.get("requests", {}).get("current", None)
     except Exception:
         pass
-    send_private(card_private_nightly_report(ok, sources, api_budget))
 
+    send_private(card_private_nightly_report(ok, sources, api_budget))
 
 # ── Weekly digest ─────────────────────────────────────────────
 
@@ -332,17 +364,18 @@ def run_weekly_digest():
     except Exception as e:
         send_private(card_private_error("run_weekly_digest", e))
 
-
 # ── Schedule ──────────────────────────────────────────────────
 
 def main():
     startup()
+
     schedule.every().day.at(CACHE_REFRESH_TIME).do(run_nightly_refresh)
     schedule.every().day.at(DIGEST_TIME).do(run_daily_digest)
     schedule.every(30).minutes.do(run_edge_scan)
     schedule.every(30).minutes.do(run_result_checker)
     schedule.every().day.at("21:00").do(run_end_of_day)
     schedule.every().sunday.at("20:00").do(run_weekly_digest)
+
     log.info("Scheduler running")
     while True:
         try:
@@ -351,7 +384,6 @@ def main():
             send_private(card_private_error("scheduler loop", e))
             log.error(traceback.format_exc())
         time.sleep(60)
-
 
 if __name__ == "__main__":
     main()
