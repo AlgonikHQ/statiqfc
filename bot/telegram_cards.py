@@ -208,13 +208,15 @@ def card_fixture_skip(home, away, league, kickoff_utc, score, max_score, next_ko
 
 # ── PUBLIC: End-of-day no alerts ──────────────────────────────
 
-def card_no_alerts_today(fixtures_scanned):
-    scanned_str = str(fixtures_scanned) if fixtures_scanned else "today's"
+def card_no_alerts_today(fixtures_scanned, top_score=0, leagues_scanned=None):
+    scanned_str   = str(fixtures_scanned) if fixtures_scanned else "today's"
+    league_labels = {"PL":"PL","BL1":"Bundesliga","SA":"Serie A","FL1":"Ligue 1","PD":"La Liga","CL":"UCL","EC":"Euros","WC":"World Cup"}
+    leagues_str   = " & ".join(sorted(league_labels.get(l, l) for l in leagues_scanned)) if leagues_scanned else "all leagues"
     return (
         "\U0001f4ca *End of day \u2014 no edges found*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "Scanned " + scanned_str + " fixture(s) across all leagues today.\n"
-        "No statistical conditions met our threshold.\n\n"
+        "Today's scan: " + scanned_str + " fixtures across " + leagues_str + ". Top score: " + str(top_score) + "/6. Our threshold is 4/6.\n\n"
+        "When our 6-layer model (form, xG, splits, H2H, standings, odds) doesn't align, we stay out. No forced picks, no filler content.\n\n"
         "_Quality over quantity. Back tomorrow._"
     )
 

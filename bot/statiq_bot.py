@@ -38,16 +38,20 @@ log = logging.getLogger(__name__)
 _vip_announced    = False
 _fixtures_scanned = 0
 _near_misses      = []
+_top_score        = 0
+_leagues_scanned  = set()
 _skip_sent        = set()
 _last_reset_date  = None
 
 
 def _daily_reset():
-    global _fixtures_scanned, _near_misses, _skip_sent, _last_reset_date
+    global _fixtures_scanned, _near_misses, _top_score, _leagues_scanned, _skip_sent, _last_reset_date
     today = datetime.now(timezone.utc).date()
     if _last_reset_date != today:
         _fixtures_scanned = 0
         _near_misses      = []
+        _top_score        = 0
+        _leagues_scanned  = set()
         _skip_sent        = set()
         _last_reset_date  = today
 
@@ -109,7 +113,7 @@ def run_daily_digest():
 # ── Edge scan ─────────────────────────────────────────────────
 
 def run_edge_scan():
-    global _fixtures_scanned, _near_misses, _skip_sent
+    global _fixtures_scanned, _near_misses, _top_score, _leagues_scanned, _skip_sent
     _daily_reset()
     try:
         now    = datetime.now(timezone.utc)
@@ -140,6 +144,7 @@ def run_edge_scan():
             home = fix["home"]
             away = fix["away"]
             _fixtures_scanned += 1
+            _leagues_scanned.add(fix.get("league", "PL"))
 
             fix_has_alert = any(e["fixture_id"] == fid for e in edges)
             if fix_has_alert:
@@ -154,6 +159,8 @@ def run_edge_scan():
                     best_result = result
 
             if best_result:
+                if best_result["score"] > _top_score:
+                    _top_score = best_result["score"]
                 if best_result["score"] == MIN_SCORE_TO_ALERT - 1:
                     nm = {
                         "fixture_id": fid,
@@ -226,12 +233,12 @@ def run_edge_scan():
 # ── End of day (21:00 UTC) ────────────────────────────────────
 
 def run_end_of_day():
-    global _near_misses, _fixtures_scanned
+    global _near_misses, _fixtures_scanned, _top_score, _leagues_scanned
     _daily_reset()
     try:
         alerts_today = count_today_alerts()
         if alerts_today == 0 and _fixtures_scanned > 0:
-            send_public_buttons(card_no_alerts_today(_fixtures_scanned), buttons_digest())
+            send_public_buttons(card_no_alerts_today(_fixtures_scanned, _top_score, _leagues_scanned), buttons_digest())
         if _near_misses:
             msg = card_private_near_misses(_near_misses, BOT_VERSION)
             if msg:
