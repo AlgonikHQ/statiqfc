@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS selections (
     home         TEXT,
     away         TEXT,
     market       TEXT NOT NULL,     -- e.g. BTTS, CS_HOME, OVER25
-    is_builder   INTEGER DEFAULT 0, -- 1 = builder single (£10), 0 = standard (£25)
+    is_builder   INTEGER DEFAULT 0, -- 1 = builder single (0.5u), 0 = standard (1u)
     stake        REAL,
     odds         REAL,
     potential    REAL,
@@ -222,3 +222,88 @@ def export_roi_json(path="/root/statiq/dashboard/roi.json"):
     roi["selections_log"] = [dict(s) for s in sels]
     with open(path, "w") as f:
         json.dump(roi, f, indent=2)
+
+# ── Daily P&L ────────────────────────────────────────────────
+
+def refresh_daily_pnl(date_iso=None):
+    """Compute and store today's P&L into daily_pnl table."""
+    if date_iso is None:
+        date_iso = datetime.utcnow().date().isoformat()
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT result, stake, odds, profit
+        FROM selections
+        WHERE substr(created_at, 1, 10) = ?
+    """, (date_iso,))
+    rows = cur.fetchall()
+
+    edges    = len(rows)
+    wins     = sum(1 for r in rows if r["result"] == "WIN")
+    losses   = sum(1 for r in rows if r["result"] == "LOSS")
+    pushes   = sum(1 for r in rows if r["result"] == "PUSH")
+    voids    = sum(1 for r in rows if r["result"] == "VOID")
+    staked   = round(sum(r["stake"] for r in rows if r["result"] not in ("VOID", None)), 2)
+    returned = round(sum(r["stake"] * r["odds"] for r in rows if r["result"] == "WIN"), 2)
+    pnl      = round(returned - staked, 2)
+    roi_pct  = round((pnl / staked * 100), 2) if staked > 0 else 0.0
+
+    conn.execute("""
+        INSERT OR REPLACE INTO daily_pnl
+        (date, edges_placed, wins, losses, pushes, voids,
+         stake_units, return_units, pnl_units, daily_roi_pct, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (date_iso, edges, wins, losses, pushes, voids,
+          staked, returned, pnl, roi_pct,
+          datetime.utcnow().isoformat()))
+    conn.commit()
+    conn.close()
+    return {
+        "date": date_iso, "edges": edges, "wins": wins, "losses": losses,
+        "pushes": pushes, "voids": voids, "staked": staked,
+        "returned": returned, "pnl": pnl, "roi_pct": roi_pct
+    }
+
+
+def get_daily_pnl(date_iso=None):
+    """Get today's (or specified date's) P&L snapshot."""
+    if date_iso is None:
+        date_iso = datetime.utcnow().date().isoformat()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM daily_pnl WHERE date = ?", (date_iso,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_alltime_stats():
+    """Aggregate all-time stats from daily_pnl."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            SUM(edges_placed) AS total_edges,
+            SUM(wins) AS total_wins,
+            SUM(losses) AS total_losses,
+            SUM(pushes) AS total_pushes,
+            SUM(voids) AS total_voids,
+            SUM(stake_units) AS total_staked,
+            SUM(return_units) AS total_returned,
+            SUM(pnl_units) AS total_pnl,
+            COUNT(*) AS active_days
+        FROM daily_pnl
+    """)
+    row = dict(cur.fetchone())
+    conn.close()
+    if row["total_staked"] and row["total_staked"] > 0:
+        row["roi_pct"] = round((row["total_pnl"] / row["total_staked"] * 100), 2)
+    else:
+        row["roi_pct"] = 0.0
+    # Replace None with 0 for safe display
+    for k in ("total_edges","total_wins","total_losses","total_pushes","total_voids","total_staked","total_returned","total_pnl","active_days"):
+        if row.get(k) is None:
+            row[k] = 0
+    return row
+
