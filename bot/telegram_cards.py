@@ -24,7 +24,7 @@ FOOTER     = "\n\n\u2699\ufe0f StatiqFC {version} | data: football-data.org + Un
 def _ko_time(utc_str):
     try:
         dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
-        return dt.strftime("%H:%M UTC")
+        uk=dt.astimezone(__import__("zoneinfo").ZoneInfo("Europe/London"));tz="BST" if int(uk.utcoffset().seconds)==3600 else "GMT";return uk.strftime("%H:%M")+" "+tz
     except Exception:
         return utc_str
 
