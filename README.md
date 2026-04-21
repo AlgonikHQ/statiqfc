@@ -1,6 +1,6 @@
-# StatiqFC ⚽
+# StatIQFC ⚽
 
-StatIQFC ⚽ — Automated edge detection across PL, Bundesliga, Serie A, Ligue 1, La Liga & Champions League. Paper staked. Full ROI tracked. No hype, just data.
+Automated edge detection across PL, Bundesliga, Serie A, Ligue 1, La Liga & Champions League. Paper staked. Full ROI tracked. No hype, just data.
 
 ---
 
