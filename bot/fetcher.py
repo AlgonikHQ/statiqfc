@@ -4,6 +4,10 @@
 # ============================================================
 
 import requests
+try:
+    from fetcher_fbcouk import fetch_all_leagues_current_season
+except ImportError:
+    from bot.fetcher_fbcouk import fetch_all_leagues_current_season
 import sqlite3
 import json
 import re
@@ -62,126 +66,87 @@ def _db():
 # ── Fixtures & Results ───────────────────────────────────────
 
 def fetch_fixtures(days_ahead=7):
-    """Pull upcoming fixtures for all configured leagues."""
-    date_from = datetime.utcnow().strftime("%Y-%m-%d")
-    date_to   = (datetime.utcnow() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
-    total = 0
-    for league in LEAGUE_CODES:
-        data = _get(
-            f"{FD_BASE_URL}/competitions/{league}/matches",
-            headers=FD_HEADERS,
-            params={"dateFrom": date_from, "dateTo": date_to, "status": "SCHEDULED"},
-            label=f"fixtures-{league}"
-        )
-        if not data:
-            continue
-        conn = _db()
-        for m in data.get("matches", []):
-            conn.execute("""
-                INSERT OR REPLACE INTO fixtures
-                (fixture_id, home, away, kickoff_utc, league, status, updated_at)
-                VALUES (?,?,?,?,?,?,?)
-            """, (
-                str(m["id"]),
-                m["homeTeam"]["shortName"],
-                m["awayTeam"]["shortName"],
-                m["utcDate"],
-                league,
-                m["status"],
-                datetime.utcnow().isoformat()
-            ))
-        conn.commit()
-        conn.close()
-        count = len(data.get("matches", []))
-        total += count
-        log.info(f"Fixtures cached [{league}]: {count} matches")
-        time.sleep(0.5)  # stay within free tier rate limit
-    log.info(f"Total fixtures cached: {total} across {len(LEAGUE_CODES)} leagues")
+    """Pull upcoming fixtures via football-data.co.uk fixtures.csv (covers all 8 leagues, no rate limit)."""
+    try:
+        from fetcher_fbcouk import fetch_upcoming_fixtures
+    except ImportError:
+        from bot.fetcher_fbcouk import fetch_upcoming_fixtures
+    inserted, skipped = fetch_upcoming_fixtures()
+    log.info(f"Fixtures refresh: {inserted} fixtures cached across configured leagues ({skipped} non-target rows skipped)")
+    return inserted
+
 
 def fetch_results(days_back=3):
-    """Pull recent results for all configured leagues."""
-    date_from = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-    date_to   = datetime.utcnow().strftime("%Y-%m-%d")
-    all_finished = []
-    for league in LEAGUE_CODES:
-        data = _get(
-            f"{FD_BASE_URL}/competitions/{league}/matches",
-            headers=FD_HEADERS,
-            params={"dateFrom": date_from, "dateTo": date_to, "status": "FINISHED"},
-            label=f"results-{league}"
+    """Pull recent results via football-data.co.uk CSV + sync FINISHED status into fixtures table."""
+    log.info("Pulling results via football-data.co.uk CSVs")
+    inserted, _ = fetch_all_leagues_current_season()
+    # Sync any matching scheduled fixtures to FINISHED
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE fixtures
+        SET status='FINISHED',
+            home_score=(SELECT fthg FROM results r WHERE r.home=fixtures.home AND r.away=fixtures.away AND r.date=substr(fixtures.kickoff_utc,1,10) LIMIT 1),
+            away_score=(SELECT ftag FROM results r WHERE r.home=fixtures.home AND r.away=fixtures.away AND r.date=substr(fixtures.kickoff_utc,1,10) LIMIT 1),
+            updated_at=?
+        WHERE status IN ('SCHEDULED','TIMED','IN_PLAY')
+        AND EXISTS (
+            SELECT 1 FROM results r
+            WHERE r.home=fixtures.home AND r.away=fixtures.away AND r.date=substr(fixtures.kickoff_utc,1,10)
         )
-        if not data:
-            continue
-        conn = _db()
-        for m in data.get("matches", []):
-            conn.execute("""
-                UPDATE fixtures SET status='FINISHED', home_score=?, away_score=?, updated_at=?
-                WHERE fixture_id=?
-            """, (
-                m["score"]["fullTime"]["home"],
-                m["score"]["fullTime"]["away"],
-                datetime.utcnow().isoformat(),
-                str(m["id"])
-            ))
-            all_finished.append({
-                "fixture_id": str(m["id"]),
-                "home":       m["homeTeam"]["shortName"],
-                "away":       m["awayTeam"]["shortName"],
-                "home_score": m["score"]["fullTime"]["home"],
-                "away_score": m["score"]["fullTime"]["away"]
-            })
-        conn.commit()
-        conn.close()
-        time.sleep(0.5)
-    return all_finished
-
-# ── Team Form ─────────────────────────────────────────────────
+    """, (datetime.utcnow().isoformat(),))
+    synced = cur.rowcount
+    conn.commit()
+    conn.close()
+    log.info(f"Results sync: {inserted} CSV rows ingested, {synced} fixtures marked FINISHED")
+    return inserted
 
 def fetch_team_form(team_id, team_name):
-    """Fetch last 8 matches for a team and compute form stats."""
-    data = _get(
-        f"{FD_BASE_URL}/teams/{team_id}/matches",
-        headers=FD_HEADERS,
-        params={"status": "FINISHED", "limit": 8},
-        label=f"form-{team_name}"
-    )
-    if not data:
+    """Compute team form from the results table (last 8 matches)."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT date, home, away, fthg, ftag
+        FROM results
+        WHERE home=? OR away=?
+        ORDER BY date DESC
+        LIMIT 8
+    """, (team_name, team_name))
+    rows = cur.fetchall()
+    if not rows:
+        conn.close()
         return
-    matches = data.get("matches", [])
+
     last5_wdl, gf_list, ga_list, cs_list, btts_list = [], [], [], [], []
-    # home/away split lists
     home_cs_list, home_btts_list, away_cs_list, away_btts_list = [], [], [], []
 
-    for m in matches:
-        h = m["score"]["fullTime"]["home"]
-        a = m["score"]["fullTime"]["away"]
-        is_home = m["homeTeam"]["name"] == team_name
-        gf = h if is_home else a
-        ga = a if is_home else h
+    for row in rows:
+        date, home, away, fthg, ftag = row["date"], row["home"], row["away"], row["fthg"], row["ftag"]
+        if fthg is None or ftag is None:
+            continue
+        is_home = (home == team_name)
+        gf = fthg if is_home else ftag
+        ga = ftag if is_home else fthg
         gf_list.append(gf)
         ga_list.append(ga)
         cs_list.append(1 if ga == 0 else 0)
-        btts_list.append(1 if h > 0 and a > 0 else 0)
-
-        # split tracking
+        btts_list.append(1 if fthg > 0 and ftag > 0 else 0)
         if is_home:
             home_cs_list.append(1 if ga == 0 else 0)
-            home_btts_list.append(1 if h > 0 and a > 0 else 0)
+            home_btts_list.append(1 if fthg > 0 and ftag > 0 else 0)
         else:
             away_cs_list.append(1 if ga == 0 else 0)
-            away_btts_list.append(1 if h > 0 and a > 0 else 0)
-
+            away_btts_list.append(1 if fthg > 0 and ftag > 0 else 0)
         if len(last5_wdl) < 5:
-            if gf > ga:   last5_wdl.append("W")
+            if gf > ga:    last5_wdl.append("W")
             elif gf == ga: last5_wdl.append("D")
             else:          last5_wdl.append("L")
 
-    cs_rate_home  = round(sum(home_cs_list)/len(home_cs_list), 2)   if home_cs_list  else None
+    cs_rate_home   = round(sum(home_cs_list)/len(home_cs_list), 2)   if home_cs_list  else None
     btts_rate_home = round(sum(home_btts_list)/len(home_btts_list), 2) if home_btts_list else None
-    cs_rate_away  = round(sum(away_cs_list)/len(away_cs_list), 2)   if away_cs_list  else None
+    cs_rate_away   = round(sum(away_cs_list)/len(away_cs_list), 2)   if away_cs_list  else None
     btts_rate_away = round(sum(away_btts_list)/len(away_btts_list), 2) if away_btts_list else None
 
-    conn = _db()
     conn.execute("""
         INSERT OR REPLACE INTO form
         (team, last5, goals_for, goals_ag, cs_rate, btts_rate,
@@ -195,10 +160,7 @@ def fetch_team_form(team_id, team_name):
         round(sum(ga_list)/len(ga_list), 2) if ga_list else 0,
         round(sum(cs_list)/len(cs_list), 2) if cs_list else 0,
         round(sum(btts_list)/len(btts_list), 2) if btts_list else 0,
-        cs_rate_home,
-        btts_rate_home,
-        cs_rate_away,
-        btts_rate_away,
+        cs_rate_home, btts_rate_home, cs_rate_away, btts_rate_away,
         datetime.utcnow().isoformat()
     ))
     conn.commit()
@@ -207,33 +169,35 @@ def fetch_team_form(team_id, team_name):
 # ── H2H ──────────────────────────────────────────────────────
 
 def fetch_h2h(fixture_id):
-    data = _get(
-        f"{FD_BASE_URL}/matches/{fixture_id}/head2head",
-        headers=FD_HEADERS,
-        params={"limit": 6},
-        label=f"h2h-{fixture_id}"
-    )
-    if not data:
+    """Pull last 6 H2H meetings from the results table."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("SELECT home, away FROM fixtures WHERE fixture_id=?", (fixture_id,))
+    fix = cur.fetchone()
+    if not fix:
+        conn.close()
         return []
-    conn     = _db()
+    home_team, away_team = fix["home"], fix["away"]
+    cur.execute("""
+        SELECT date, home, away, fthg AS home_score, ftag AS away_score
+        FROM results
+        WHERE (home=? AND away=?) OR (home=? AND away=?)
+        ORDER BY date DESC
+        LIMIT 6
+    """, (home_team, away_team, away_team, home_team))
+    rows = cur.fetchall()
     h2h_rows = []
-    for m in data.get("matches", []):
-        h = m["score"]["fullTime"]["home"]
-        a = m["score"]["fullTime"]["away"]
+    for row in rows:
+        # Sync into legacy h2h table for any consumers that still read it
         conn.execute("""
             INSERT OR IGNORE INTO h2h
             (fixture_id, home, away, date, home_score, away_score)
             VALUES (?,?,?,?,?,?)
-        """, (
-            fixture_id,
-            m["homeTeam"]["shortName"],
-            m["awayTeam"]["shortName"],
-            m["utcDate"][:10],
-            h, a
-        ))
+        """, (fixture_id, row["home"], row["away"], row["date"], row["home_score"], row["away_score"]))
         h2h_rows.append({
-            "home": m["homeTeam"]["shortName"], "away": m["awayTeam"]["shortName"],
-            "home_score": h, "away_score": a, "date": m["utcDate"][:10]
+            "home": row["home"], "away": row["away"],
+            "home_score": row["home_score"], "away_score": row["away_score"],
+            "date": row["date"]
         })
     conn.commit()
     conn.close()
@@ -409,10 +373,37 @@ def fetch_odds(fixture_id, home, away):
 
 # ── Nightly cache rebuild ─────────────────────────────────────
 
+def refresh_all_team_forms():
+    """Compute form for every team that appears in the results table."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT DISTINCT team FROM (
+            SELECT home AS team FROM results
+            UNION
+            SELECT away AS team FROM results
+        )
+    """)
+    teams = [row["team"] for row in cur.fetchall()]
+    conn.close()
+    log.info(f"Computing form for {len(teams)} teams")
+    ok, fail = 0, 0
+    for team in teams:
+        try:
+            fetch_team_form(None, team)
+            ok += 1
+        except Exception as e:
+            log.warning(f"Form failed for {team}: {e}")
+            fail += 1
+    log.info(f"Form refresh complete: {ok} ok, {fail} failed")
+    return ok, fail
+
+
 def nightly_refresh():
     log.info("Nightly cache refresh started")
     fetch_fixtures(days_ahead=7)
     fetch_results(days_back=3)
+    refresh_all_team_forms()
     refresh_xg_all_teams()
     try:
         from apifootball import nightly_apifootball_refresh
