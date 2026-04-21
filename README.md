@@ -1,7 +1,6 @@
 # StatiqFC ⚽
 
-**A fully automated Premier League stats service.**
-No tips. No hype. Just data — delivered to Telegram before every match.
+StatIQFC ⚽ — Automated edge detection across PL, Bundesliga, Serie A, Ligue 1, La Liga & Champions League. Paper staked. Full ROI tracked. No hype, just data.
 
 ---
 
