@@ -256,12 +256,21 @@ def _make_fixture_id(league, date, home, away):
 
 
 def _combine_kickoff(date_iso, time_str):
-    """Combine 'YYYY-MM-DD' + 'HH:MM' into ISO kickoff string."""
+    """Combine 'YYYY-MM-DD' + 'HH:MM' (UK local time from fbcouk) into ISO UTC.
+    fbcouk times are UK local (BST/GMT). Convert to true UTC before storage."""
     if not date_iso:
         return None
     if not time_str or time_str.strip() == "":
         time_str = "12:00"
-    return f"{date_iso}T{time_str.strip()}:00Z"
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        local = datetime.fromisoformat(f"{date_iso}T{time_str.strip()}:00").replace(tzinfo=ZoneInfo("Europe/London"))
+        utc   = local.astimezone(ZoneInfo("UTC"))
+        return utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        # Fallback: naive UK-local -> UTC via fixed +1h during BST (April)
+        return f"{date_iso}T{time_str.strip()}:00Z"
 
 
 def fetch_upcoming_fixtures():

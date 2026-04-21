@@ -15,6 +15,9 @@ LEAGUE_LABELS = {
     "CL":  "\u2b50 Champions League",
     "EC":  "\U0001f30d European Championship",
     "WC":  "\U0001f30e World Cup",
+    "ELC": "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f Championship",
+    "DED": "\U0001f1f3\U0001f1f1 Eredivisie",
+    "PPL": "\U0001f1f5\U0001f1f9 Primeira Liga",
 }
 
 DISCLAIMER = "\n\n\u26a0\ufe0f Paper portfolio only. No financial advice. 18+ Gamble responsibly."
@@ -108,17 +111,42 @@ def buttons_vip():
 # ── PUBLIC: Daily digest ──────────────────────────────────────
 
 def card_daily_digest(fixtures):
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        today_str = datetime.now(ZoneInfo("Europe/London")).strftime("%A %d %B %Y")
+    except Exception:
+        today_str = datetime.utcnow().strftime("%A %d %B %Y")
+
     by_league = defaultdict(list)
     for f in fixtures:
         by_league[f.get("league", "PL")].append(f)
+    total = len(fixtures)
 
-    lines = ["\U0001f4cb *Top Fixtures Today*\n"]
-    for league_code, lf in sorted(by_league.items()):
-        lines.append("\n" + _league_label(league_code))
-        for f in lf:
+    lines = [
+        "\U0001f5d3\ufe0f *Today\u2019s Fixture Card*",
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+        "_" + today_str + "_",
+        "",
+        str(total) + " fixtures scanning across " + str(len(by_league)) + " leagues.",
+        ""
+    ]
+
+    league_order = ["PL", "ELC", "BL1", "SA", "FL1", "PD", "DED", "PPL"]
+    ordered_codes = [c for c in league_order if c in by_league] + [c for c in sorted(by_league) if c not in league_order]
+
+    for code in ordered_codes:
+        lines.append("*" + _league_label(code) + "*")
+        for f in sorted(by_league[code], key=lambda x: x["kickoff_utc"]):
             ko = _ko_time(f["kickoff_utc"])
-            lines.append("  \u26bd " + f["home"] + " vs " + f["away"] + " \u2014 " + ko)
-    lines.append("\nEdge Alerts fire 2hrs before kick-off.")
+            lines.append("  \u26bd " + f["home"] + " vs " + f["away"] + "  \u2022  " + ko)
+        lines.append("")
+
+    lines.extend([
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+        "_Picks announced individually 30 mins before each kickoff._",
+        "_Edge alerts fire when our 6-layer model scores \u2265 4/6._"
+    ])
     return "\n".join(lines)
 
 
@@ -175,7 +203,7 @@ def card_edge_alert(edge, form_home, form_away, h2h_rows, odds, version):
         "\U0001f3df\ufe0f  *" + home + " vs " + away + "*\n"
         "\u23f0  Kick-off: " + ko + "\n\n"
         "\U0001f4cc  *Market:* " + market_label + "\n"
-        "\U0001f4b7  Stake: \xa3" + str(stake) + "  |  Odds: " + str(odds_val) + "  |  Potential: \xa3" + str(potential) + "\n\n"
+        "\U0001f4b7  Stake: " + str(stake) + "u  |  Odds: " + str(odds_val) + "  |  Potential: " + str(round(potential, 2)) + "u\n\n"
         "\U0001f4ca  *Form (last 5)*\n"
         "  " + home + ": " + h_form + "\n"
         "  " + away + ": " + a_form + "\n\n"
@@ -207,6 +235,119 @@ def card_fixture_skip(home, away, league, kickoff_utc, score, max_score, next_ko
 
 
 # ── PUBLIC: End-of-day no alerts ──────────────────────────────
+
+# ── PUBLIC: Clean skip notice (T-30 mins before kickoff) ─────
+
+# ── PUBLIC: Full-time result (no scorers, 1-3h lag via CSV) ──
+
+def card_public_ft_result(home, away, home_score, away_score, league, was_edge=False, edge_result=None):
+    """Clean FT result card for subscribers. Shows edge result if applicable."""
+    league_label = _league_label(league)
+    edge_line    = ""
+    if was_edge and edge_result:
+        emoji = {"WIN":"\u2705","LOSS":"\u274c","VOID":"\u21a9\ufe0f","PUSH":"\u21a9\ufe0f"}.get(edge_result, "")
+        edge_line = "\n\n" + emoji + " *Our pick: " + edge_result + "*"
+    return (
+        "\u23f1 *FT \u2014 " + home + " " + str(home_score) + "-" + str(away_score) + " " + away + "*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        + league_label
+        + edge_line
+    )
+
+
+def card_public_skip(home, away, league, kickoff_utc):
+    """Clean, professional skip notice for subscribers. No verbose scoring."""
+    league_label = _league_label(league)
+    ko           = _ko_time(kickoff_utc)
+    return (
+        "\u26aa *Skipped \u2014 " + home + " vs " + away + "*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        + league_label + " | " + ko + "\n\n"
+        "No viable edge \u2014 no pick posted."
+    )
+
+
+# ── PUBLIC: End-of-day unified summary ───────────────────────
+
+def card_public_eod_summary(today_stats, alltime_stats, leagues_scanned=None):
+    """End-of-day summary for subscribers. Always posts.
+    today_stats from get_daily_pnl(), alltime_stats from get_alltime_stats()."""
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        date_str = datetime.now(ZoneInfo("Europe/London")).strftime("%A %d %B %Y")
+    except Exception:
+        date_str = datetime.utcnow().strftime("%A %d %B %Y")
+
+    edges = today_stats.get("edges_placed", 0) if today_stats else 0
+    if today_stats and today_stats.get("edges", 0):
+        edges = today_stats["edges"]
+
+    # Normalise key names (refresh_daily_pnl returns slightly different shape than get_daily_pnl)
+    def _g(d, *keys, default=0):
+        for k in keys:
+            if d and d.get(k) is not None:
+                return d[k]
+        return default
+
+    wins    = _g(today_stats, "wins")
+    losses  = _g(today_stats, "losses")
+    pushes  = _g(today_stats, "pushes")
+    voids   = _g(today_stats, "voids")
+    staked  = _g(today_stats, "stake_units", "staked")
+    ret     = _g(today_stats, "return_units", "returned")
+    pnl     = _g(today_stats, "pnl_units", "pnl")
+    roi     = _g(today_stats, "daily_roi_pct", "roi_pct")
+
+    at_edges  = _g(alltime_stats, "total_edges")
+    at_wins   = _g(alltime_stats, "total_wins")
+    at_losses = _g(alltime_stats, "total_losses")
+    at_staked = _g(alltime_stats, "total_staked")
+    at_pnl    = _g(alltime_stats, "total_pnl")
+    at_roi    = _g(alltime_stats, "roi_pct")
+    at_days   = _g(alltime_stats, "active_days")
+
+    pnl_emoji = "\U0001f7e2" if pnl > 0 else ("\U0001f534" if pnl < 0 else "\u26aa")
+    at_pnl_emoji = "\U0001f7e2" if at_pnl > 0 else ("\U0001f534" if at_pnl < 0 else "\u26aa")
+
+    lines = [
+        "\U0001f4ca *End of Day Summary*",
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+        "_" + date_str + "_",
+        ""
+    ]
+
+    if edges == 0:
+        lines.extend([
+            "\u26aa *No edges today*",
+            "Our 6-layer model didn\u2019t find any picks meeting threshold (4/6).",
+            "When the data doesn\u2019t align, we stay out. Quality over quantity.",
+            ""
+        ])
+    else:
+        win_line = str(wins) + "W"
+        if losses: win_line += " \u2013 " + str(losses) + "L"
+        if pushes: win_line += " \u2013 " + str(pushes) + "P"
+        if voids:  win_line += " \u2013 " + str(voids) + "V"
+
+        lines.extend([
+            "\U0001f4cd *Today\u2019s picks: " + str(edges) + "*",
+            "   " + win_line,
+            "   Staked: " + str(round(staked, 2)) + "u  |  Returned: " + str(round(ret, 2)) + "u",
+            "   " + pnl_emoji + " P&L: " + ("+" if pnl >= 0 else "") + str(round(pnl, 2)) + "u  |  ROI: " + ("+" if roi >= 0 else "") + str(round(roi, 2)) + "%",
+            ""
+        ])
+
+    lines.extend([
+        "\U0001f4c8 *All-time (over " + str(at_days) + " active day" + ("s" if at_days != 1 else "") + ")*",
+        "   Picks: " + str(at_edges) + "  |  " + str(at_wins) + "W\u2013" + str(at_losses) + "L",
+        "   Staked: " + str(round(at_staked, 2)) + "u  |  " + at_pnl_emoji + " P&L: " + ("+" if at_pnl >= 0 else "") + str(round(at_pnl, 2)) + "u  |  ROI: " + ("+" if at_roi >= 0 else "") + str(round(at_roi, 2)) + "%",
+        "",
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+        "_Results track paper stakes only. 18+ gamble responsibly._"
+    ])
+    return "\n".join(lines)
+
 
 def card_no_alerts_today(fixtures_scanned, top_score=0, leagues_scanned=None):
     scanned_str   = str(fixtures_scanned) if fixtures_scanned else "today's"
@@ -244,16 +385,16 @@ def card_result(selection, roi):
         roi_line = (
             "\n\n\U0001f4c8 *Running record*"
             "\n  W" + str(roi["wins"]) + " L" + str(roi["losses"]) +
-            " | Staked: \xa3" + str(roi["total_staked"]) +
-            " | P&L: " + pl_s + "\xa3" + str(roi["net_pl"]) +
+            " | Staked: " + str(round(roi["total_staked"], 2)) + "u" +
+            " | P&L: " + pl_s + str(round(roi["net_pl"], 2)) + "u" +
             " | ROI: " + roi_sign + str(roi["roi_pct"]) + "%"
         )
 
     return (
         result_emoji + " *Result \u2014 " + home + " vs " + away + "*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "Market: " + market_label + " | Odds: " + str(odds_val) + " | Stake: \xa3" + str(stake) + "\n"
-        "*Profit: " + pl_sign + "\xa3" + str(profit) + "*" +
+        "Market: " + market_label + " | Odds: " + str(odds_val) + " | Stake: " + str(stake) + "u\n"
+        "*Profit: " + pl_sign + str(round(profit, 2)) + "u*" +
         roi_line +
         DISCLAIMER
     )
@@ -306,7 +447,7 @@ def card_private_startup(version, patch_notes, leagues):
         "\U0001f4e1 Public channel: active\n"
         "\U0001f5d3\ufe0f Scheduler: running\n\n"
         "\U0001f4cb *Leagues active:*\n" + league_list + "\n\n"
-        "\U0001f4b7 Stakes: \xa325 standard / \xa310 builder\n"
+        "\U0001f4b7 Stakes: 1u standard / 0.5u builder\n"
         "\U0001f3af Alert threshold: 4/6 layers\n"
         "\U0001f3af VIP target: +20% ROI / 50 selections\n\n"
         "_" + patch_notes + "_"
@@ -421,9 +562,9 @@ def card_private_roi_summary(roi, label="Daily ROI Summary"):
         "\U0001f4ca *" + label + "*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Selections: " + str(roi["selections"]) + "  (W" + str(roi["wins"]) + " L" + str(roi["losses"]) + " V" + str(roi.get("voids", 0)) + ")\n"
-        "Staked:     \xa3" + str(roi["total_staked"]) + "\n"
-        "Returned:   \xa3" + str(roi["total_return"]) + "\n"
-        "Net P&L:    " + sign(roi["net_pl"]) + "\xa3" + str(roi["net_pl"]) + "\n"
+        "Staked:     " + str(round(roi["total_staked"], 2)) + "u\n"
+        "Returned:   " + str(round(roi["total_return"], 2)) + "u\n"
+        "Net P&L:    " + sign(roi["net_pl"]) + str(round(roi["net_pl"], 2)) + "u\n"
         "ROI:        " + sign(roi["roi_pct"]) + str(roi["roi_pct"]) + "%\n\n"
         "VIP progress: " + str(roi["selections"]) + "/50 sels | " + sign(roi["roi_pct"]) + str(roi["roi_pct"]) + "% ROI"
     )
