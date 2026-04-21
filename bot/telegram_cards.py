@@ -112,7 +112,7 @@ def card_daily_digest(fixtures):
     for f in fixtures:
         by_league[f.get("league", "PL")].append(f)
 
-    lines = ["\U0001f4cb *Today's Fixtures*\n"]
+    lines = ["\U0001f4cb *Top Fixtures Today*\n"]
     for league_code, lf in sorted(by_league.items()):
         lines.append("\n" + _league_label(league_code))
         for f in lf:

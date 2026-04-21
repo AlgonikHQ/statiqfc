@@ -85,6 +85,8 @@ def startup():
 # ── Daily digest ──────────────────────────────────────────────
 
 def run_daily_digest():
+    if _last_reset_date == datetime.utcnow().date() and _fixtures_scanned > 0:
+        return
     _daily_reset()
     try:
         today = datetime.now(timezone.utc).date().isoformat()
