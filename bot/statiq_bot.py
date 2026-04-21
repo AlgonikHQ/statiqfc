@@ -55,7 +55,7 @@ def _daily_reset():
 def _ko_time_safe(utc_str):
     try:
         dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
-        return dt.strftime("%H:%M UTC")
+        return dt.astimezone(__import__("zoneinfo").ZoneInfo("Europe/London")).strftime("%H:%M BST")
     except Exception:
         return utc_str
 
@@ -76,7 +76,7 @@ def startup():
         "\u2705 All systems operational\n"
         "\U0001f4e6 Version: " + BOT_VERSION + "\n"
         "\U0001f4cb " + PATCH_NOTES + "\n"
-        "\U0001f550 " + datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC") + "\n\n"
+        "\U0001f550 " + datetime.now(__import__("zoneinfo").ZoneInfo("Europe/London")).strftime("%d %b %Y, %H:%M BST") + "\n\n"
         "Alerts resume as scheduled."
     )
     log.info("Bot started — " + BOT_VERSION)
