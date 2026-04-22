@@ -129,6 +129,11 @@ def run_edge_scan():
         if not upcoming:
             return
 
+        # Pre-populate H2H and odds for upcoming fixtures before scoring
+        from fetcher import fetch_h2h, fetch_odds_for_today
+        for fix in upcoming:
+            fetch_h2h(fix["fixture_id"])
+        fetch_odds_for_today()
         edges = scan_today(upcoming)
 
         for fix in upcoming:

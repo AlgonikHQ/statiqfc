@@ -1,6 +1,6 @@
 # ============================================================
 # scanner.py — edge detection with 6-layer scoring engine
-# v1.3 — alert fires only if score >= MIN_SCORE_TO_ALERT
+# v1.6 — league-aware standings, MIN_STRIKE_SAMPLE fix
 # ============================================================
 
 import sqlite3
@@ -14,14 +14,26 @@ logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
 log = logging.getLogger(__name__)
 
 # ── Thresholds ───────────────────────────────────────────────
-BTTS_THRESHOLD     = 0.65
-BTTS_SPLIT_MIN     = 0.55
-CS_THRESHOLD       = 0.55
-OVER25_THRESHOLD   = 2.8
+BTTS_THRESHOLD     = 0.60
+BTTS_SPLIT_MIN     = 0.50
+CS_THRESHOLD       = 0.50
+OVER25_THRESHOLD   = 2.5
 XG_OVER25_CONFIRM  = 2.5
 XG_CS_MAX_AWAY     = 1.0
-ODDS_MIN           = 1.70   # below this = already priced in, no edge
-MIN_STRIKE_SAMPLE  = 10
+ODDS_MIN           = 1.50
+MIN_STRIKE_SAMPLE  = 4
+
+LEAGUE_SIZES = {
+    "PL":  20,
+    "ELC": 24,
+    "FL1": 24,
+    "FL2": 24,
+    "PD":  20,
+    "BL1": 18,
+    "SA":  20,
+    "FL1": 20,
+    "DED": 18,
+}
 
 def _db():
     conn = sqlite3.connect(DB_PATH)
@@ -34,11 +46,16 @@ def _form(team):
     conn.close()
     return dict(row) if row else None
 
-def _standings(team):
+def _standings(team, league=None):
     conn = _db()
-    row  = conn.execute(
-        "SELECT * FROM standings WHERE team=?", (team,)
-    ).fetchone()
+    if league:
+        row = conn.execute(
+            "SELECT * FROM standings WHERE team=? AND league=?", (team, league)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM standings WHERE team=?", (team,)
+        ).fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -71,11 +88,7 @@ def _h2h_strike_rate(home, away, market):
 
 # ── Scoring engine ───────────────────────────────────────────
 
-def score_btts(fixture_id, home, away):
-    """
-    Score a BTTS pick across 6 layers.
-    Returns (score, max_score, layers_passed, reasoning) or None if base fails.
-    """
+def score_btts(fixture_id, home, away, league="PL"):
     hf = _form(home)
     af = _form(away)
     if not hf or not af:
@@ -84,11 +97,10 @@ def score_btts(fixture_id, home, away):
     h_btts = hf.get("btts_rate", 0)
     a_btts = af.get("btts_rate", 0)
 
-    # Base gate — must pass to proceed
     if h_btts < BTTS_THRESHOLD or a_btts < BTTS_THRESHOLD:
         return None
 
-    score   = 1  # base form passed
+    score   = 1
     layers  = [f"Form ✅ ({int(h_btts*100)}% / {int(a_btts*100)}%)"]
     reasons = [
         f"{home} BTTS in {int(h_btts*100)}% of last 8. "
@@ -104,7 +116,7 @@ def score_btts(fixture_id, home, away):
     else:
         layers.append(f"Split ❌")
 
-    # Layer 3 — xG confirms both teams generating chances
+    # Layer 3 — xG
     h_xg = hf.get("xg_for")
     a_xg = af.get("xg_for")
     if h_xg and a_xg and h_xg >= 1.0 and a_xg >= 1.0:
@@ -112,9 +124,9 @@ def score_btts(fixture_id, home, away):
         layers.append(f"xG ✅ ({h_xg:.2f} / {a_xg:.2f})")
         reasons.append(f"xG for: {home} {h_xg:.2f}, {away} {a_xg:.2f}.")
     else:
-        layers.append("xG ❌")
+        layers.append("xG —")
 
-    # Layer 4 — H2H strike rate
+    # Layer 4 — H2H
     strike, sample = _h2h_strike_rate(home, away, "BTTS")
     if strike and strike >= 60:
         score += 1
@@ -123,12 +135,12 @@ def score_btts(fixture_id, home, away):
     else:
         layers.append("H2H ❌" if not strike else f"H2H ❌ ({strike}%)")
 
-    # Layer 5 — standings (both teams in top half = more attacking)
-    hs = _standings(home)
-    as_ = _standings(away)
+    # Layer 5 — standings
+    hs  = _standings(home, league)
+    as_ = _standings(away, league)
+    total = LEAGUE_SIZES.get(league, 20)
     if hs and as_:
-        total_teams = 20  # default PL size
-        if hs["position"] <= total_teams // 2 or as_["position"] <= total_teams // 2:
+        if hs["position"] <= total // 2 or as_["position"] <= total // 2:
             score += 1
             layers.append(f"Standings ✅ (#{hs['position']} vs #{as_['position']})")
         else:
@@ -136,15 +148,15 @@ def score_btts(fixture_id, home, away):
     else:
         layers.append("Standings —")
 
-    # Layer 6 — odds gate
+    # Layer 6 — competitive odds gate (home win odds 1.40–3.50 = contested match)
     odds = _odds(fixture_id)
-    btts_odds = odds.get("btts_yes") if odds else None
-    if btts_odds and btts_odds >= ODDS_MIN:
+    home_odds = odds.get("home_odds") if odds else None
+    if home_odds and 1.40 <= home_odds <= 3.50:
         score += 1
-        layers.append(f"Odds ✅ ({btts_odds})")
-        reasons.append(f"Market odds: {btts_odds} — edge confirmed.")
-    elif btts_odds and btts_odds < ODDS_MIN:
-        layers.append(f"Odds ❌ ({btts_odds} — already priced in)")
+        layers.append(f"Odds ✅ (home {home_odds} — competitive)")
+        reasons.append(f"Competitive match confirmed (home odds {home_odds}).")
+    elif home_odds:
+        layers.append(f"Odds ❌ (home {home_odds} — mismatch)")
     else:
         layers.append("Odds —")
 
@@ -158,7 +170,7 @@ def score_btts(fixture_id, home, away):
     }
 
 
-def score_clean_sheet(fixture_id, home, away):
+def score_clean_sheet(fixture_id, home, away, league="PL"):
     hf = _form(home)
     af = _form(away)
     if not hf or not af:
@@ -179,16 +191,16 @@ def score_clean_sheet(fixture_id, home, away):
         f"{away} averaging {away_gf} goals away."
     ]
 
-    # Layer 2 — xG confirms away team not creating much
+    # Layer 2 — xG
     away_xg = af.get("xg_for")
     if away_xg is not None and away_xg <= XG_CS_MAX_AWAY:
         score += 1
         layers.append(f"xG ✅ (Away xG={away_xg:.2f})")
         reasons.append(f"Away xG: {away_xg:.2f} — low threat confirmed.")
     else:
-        layers.append(f"xG ❌" if away_xg is None else f"xG ❌ ({away_xg:.2f})")
+        layers.append(f"xG —" if away_xg is None else f"xG ❌ ({away_xg:.2f})")
 
-    # Layer 3 — home/away split CS
+    # Layer 3 — split CS
     if home_cs_h >= CS_THRESHOLD:
         score += 1
         layers.append(f"Split ✅")
@@ -204,9 +216,9 @@ def score_clean_sheet(fixture_id, home, away):
     else:
         layers.append("H2H ❌" if not strike else f"H2H ❌ ({strike}%)")
 
-    # Layer 5 — standings (home team higher = more dominant)
-    hs  = _standings(home)
-    as_ = _standings(away)
+    # Layer 5 — standings
+    hs  = _standings(home, league)
+    as_ = _standings(away, league)
     if hs and as_ and hs["position"] < as_["position"]:
         score += 1
         layers.append(f"Standings ✅ (#{hs['position']} vs #{as_['position']})")
@@ -215,9 +227,9 @@ def score_clean_sheet(fixture_id, home, away):
         pos_a = as_["position"] if as_ else "?"
         layers.append(f"Standings ❌ (#{pos_h} vs #{pos_a})")
 
-    # Layer 6 — odds gate
-    odds     = _odds(fixture_id)
-    cs_odds  = odds.get("home_odds") if odds else None
+    # Layer 6 — odds
+    odds    = _odds(fixture_id)
+    cs_odds = odds.get("home_odds") if odds else None
     if cs_odds and cs_odds >= ODDS_MIN:
         score += 1
         layers.append(f"Odds ✅ ({cs_odds})")
@@ -236,7 +248,7 @@ def score_clean_sheet(fixture_id, home, away):
     }
 
 
-def score_over25(fixture_id, home, away):
+def score_over25(fixture_id, home, away, league="PL"):
     hf = _form(home)
     af = _form(away)
     if not hf or not af:
@@ -254,7 +266,7 @@ def score_over25(fixture_id, home, away):
     layers  = [f"Form ✅ (avg {round(avg_goals,1)} goals/g)"]
     reasons = [f"Combined avg goals/game: {round(avg_goals,1)}."]
 
-    # Layer 2 — xG combined
+    # Layer 2 — xG
     h_xg_for = hf.get("xg_for")
     h_xg_ag  = hf.get("xg_ag")
     a_xg_for = af.get("xg_for")
@@ -270,7 +282,7 @@ def score_over25(fixture_id, home, away):
     else:
         layers.append("xG —")
 
-    # Layer 3 — home/away split both high scoring
+    # Layer 3 — split
     h_gf_home = hf.get("goals_for", 0)
     a_gf_away = af.get("goals_for", 0)
     if h_gf_home >= 1.5 and a_gf_away >= 1.0:
@@ -288,11 +300,11 @@ def score_over25(fixture_id, home, away):
     else:
         layers.append("H2H ❌" if not strike else f"H2H ❌ ({strike}%)")
 
-    # Layer 5 — standings (neither team in bottom 3 = not parking the bus)
-    hs  = _standings(home)
-    as_ = _standings(away)
+    # Layer 5 — standings
+    hs  = _standings(home, league)
+    as_ = _standings(away, league)
+    total = LEAGUE_SIZES.get(league, 20)
     if hs and as_:
-        total = 20
         if hs["position"] <= total - 3 and as_["position"] <= total - 3:
             score += 1
             layers.append(f"Standings ✅")
@@ -301,9 +313,9 @@ def score_over25(fixture_id, home, away):
     else:
         layers.append("Standings —")
 
-    # Layer 6 — odds gate
-    odds      = _odds(fixture_id)
-    o25_odds  = odds.get("over25") if odds else None
+    # Layer 6 — odds
+    odds     = _odds(fixture_id)
+    o25_odds = odds.get("over25") if odds else None
     if o25_odds and o25_odds >= ODDS_MIN:
         score += 1
         layers.append(f"Odds ✅ ({o25_odds})")
@@ -335,12 +347,13 @@ def scan_today(today_fixtures):
 
     candidates = []
     for fix in today_fixtures:
-        fid  = fix["fixture_id"]
-        home = fix["home"]
-        away = fix["away"]
+        fid    = fix["fixture_id"]
+        home   = fix["home"]
+        away   = fix["away"]
+        league = fix.get("league", "PL")
 
         for score_fn in [score_btts, score_clean_sheet, score_over25]:
-            result = score_fn(fid, home, away)
+            result = score_fn(fid, home, away, league)
             if not result:
                 continue
 
@@ -359,14 +372,12 @@ def scan_today(today_fixtures):
             result["home"]       = home
             result["away"]       = away
             result["kickoff"]    = fix["kickoff_utc"]
-            result["league"]     = fix.get("league", "PL")
+            result["league"]     = league
             result["score_str"]  = f"{score}/{result['max_score']}"
             candidates.append(result)
 
-    # Sort by score descending — strongest alerts first
     candidates.sort(key=lambda x: x["score"], reverse=True)
 
-    # De-dupe: one alert per fixture
     seen   = set()
     unique = []
     for c in candidates:

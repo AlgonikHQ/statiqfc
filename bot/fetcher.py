@@ -1,6 +1,6 @@
 # ============================================================
 # fetcher.py — all external data pulls with graceful fallback
-# v1.1 — Understat xG scraper + extended odds markets
+# v1.2 — league-aware odds, proactive bulk odds fetch, btts removed
 # ============================================================
 
 import requests
@@ -22,8 +22,21 @@ log = logging.getLogger(__name__)
 
 FD_HEADERS = {"X-Auth-Token": FD_API_KEY}
 
+# ── League → Odds API sport key map ─────────────────────────
+LEAGUE_ODDS_SPORT = {
+    "PL":  "soccer_epl",
+    "ELC": "soccer_efl_champ",
+    "FL1": "soccer_france_ligue_one",
+    "FL2": "soccer_france_ligue_two",
+    "PD":  "soccer_spain_la_liga",
+    "BL1": "soccer_germany_bundesliga",
+    "SA":  "soccer_italy_serie_a",
+    "DED": "soccer_netherlands_eredivisie",
+    "PPL": "soccer_portugal_primeira_liga",
+    "CL":  "soccer_uefa_champs_league",
+}
+
 # ── Understat team name mapping ──────────────────────────────
-# football-data.org short names → Understat slugs
 UNDERSTAT_SLUGS = {
     "Arsenal":          "Arsenal",
     "Aston Villa":      "Aston_Villa",
@@ -47,6 +60,35 @@ UNDERSTAT_SLUGS = {
     "Wolves":           "Wolverhampton_Wanderers",
 }
 
+# ── Odds API team name normalisation ────────────────────────
+# Odds API names → fixture DB names
+ODDS_TEAM_MAP = {
+    "Wolverhampton Wanderers": "Wolverhampton",
+    "Elche CF":                "Elche",
+    "Paris Saint Germain":     "Paris Saint-Germain",
+    "Brighton and Hove Albion":"Brighton & Hove Albion",
+    "Nottingham Forest":       "Nott'm Forest",
+    "Manchester United":       "Man Utd",
+    "Manchester City":         "Manchester City",
+    "Tottenham Hotspur":       "Spurs",
+    "West Ham United":         "West Ham",
+    "Newcastle United":        "Newcastle",
+}
+
+def _normalise_odds_team(name):
+    return ODDS_TEAM_MAP.get(name, name)
+
+def _teams_match(odds_home, odds_away, db_home, db_away):
+    """Fuzzy match between odds API team names and fixture DB names."""
+    oh = _normalise_odds_team(odds_home).lower()
+    oa = _normalise_odds_team(odds_away).lower()
+    dh = db_home.lower()
+    da = db_away.lower()
+    # Direct match or one side contained in the other
+    home_match = oh == dh or dh in oh or oh in dh
+    away_match = oa == da or da in oa or oa in da
+    return home_match and away_match
+
 # ── Helpers ──────────────────────────────────────────────────
 
 def _get(url, headers=None, params=None, label=""):
@@ -66,7 +108,6 @@ def _db():
 # ── Fixtures & Results ───────────────────────────────────────
 
 def fetch_fixtures(days_ahead=7):
-    """Pull upcoming fixtures via football-data.co.uk fixtures.csv (covers all 8 leagues, no rate limit)."""
     try:
         from fetcher_fbcouk import fetch_upcoming_fixtures
     except ImportError:
@@ -77,10 +118,8 @@ def fetch_fixtures(days_ahead=7):
 
 
 def fetch_results(days_back=3):
-    """Pull recent results via football-data.co.uk CSV + sync FINISHED status into fixtures table."""
     log.info("Pulling results via football-data.co.uk CSVs")
     inserted, _ = fetch_all_leagues_current_season()
-    # Sync any matching scheduled fixtures to FINISHED
     conn = _db()
     cur = conn.cursor()
     cur.execute("""
@@ -102,7 +141,6 @@ def fetch_results(days_back=3):
     return inserted
 
 def fetch_team_form(team_id, team_name):
-    """Compute team form from the results table (last 8 matches)."""
     conn = _db()
     cur = conn.cursor()
     cur.execute("""
@@ -169,7 +207,6 @@ def fetch_team_form(team_id, team_name):
 # ── H2H ──────────────────────────────────────────────────────
 
 def fetch_h2h(fixture_id):
-    """Pull last 6 H2H meetings from the results table."""
     conn = _db()
     cur = conn.cursor()
     cur.execute("SELECT home, away FROM fixtures WHERE fixture_id=?", (fixture_id,))
@@ -188,7 +225,6 @@ def fetch_h2h(fixture_id):
     rows = cur.fetchall()
     h2h_rows = []
     for row in rows:
-        # Sync into legacy h2h table for any consumers that still read it
         conn.execute("""
             INSERT OR IGNORE INTO h2h
             (fixture_id, home, away, date, home_score, away_score)
@@ -203,14 +239,9 @@ def fetch_h2h(fixture_id):
     conn.close()
     return h2h_rows
 
-# ── Understat xG scraper (free, no key needed) ───────────────
+# ── Understat xG scraper ─────────────────────────────────────
 
 def fetch_xg_understat(team_name, last_n=5):
-    """
-    Scrape xG data for a team from Understat.
-    Returns (xg_for_avg, xg_ag_avg) over last_n matches, or (None, None) on failure.
-    No API key required — public HTML scrape.
-    """
     slug = UNDERSTAT_SLUGS.get(team_name)
     if not slug:
         log.info(f"Understat: no slug mapping for {team_name!r} — skipping xG")
@@ -225,19 +256,13 @@ def fetch_xg_understat(team_name, last_n=5):
             return None, None
 
         html = resp.text
-
-        # Understat embeds match data as JSON inside a JS var
-        # Pattern: var datesData = JSON.parse('...')
         match = re.search(r"var datesData\s*=\s*JSON\.parse\('(.*?)'\)", html)
         if not match:
             log.warning(f"Understat: datesData not found for {team_name}")
             return None, None
 
-        # Unescape the JSON string
-        raw = match.group(1).encode("utf-8").decode("unicode_escape")
+        raw     = match.group(1).encode("utf-8").decode("unicode_escape")
         matches = json.loads(raw)
-
-        # Filter finished matches only, take last N
         finished = [m for m in matches if m.get("isResult")]
         recent   = finished[-last_n:] if len(finished) >= last_n else finished
 
@@ -245,8 +270,7 @@ def fetch_xg_understat(team_name, last_n=5):
             log.info(f"Understat: no finished matches for {team_name}")
             return None, None
 
-        xg_for_list = []
-        xg_ag_list  = []
+        xg_for_list, xg_ag_list = [], []
         for m in recent:
             is_home = m.get("side") == "h"
             h_xg    = float(m.get("xG", {}).get("h", 0) or 0)
@@ -265,14 +289,9 @@ def fetch_xg_understat(team_name, last_n=5):
 
 
 def refresh_xg_all_teams():
-    """
-    Update xg_for / xg_ag in form table for every team we have form data on.
-    Called during nightly_refresh. Rate-limited to be polite to Understat.
-    """
     conn  = _db()
     teams = [row["team"] for row in conn.execute("SELECT team FROM form").fetchall()]
     conn.close()
-
     updated = 0
     for team in teams:
         xg_for, xg_ag = fetch_xg_understat(team)
@@ -286,48 +305,23 @@ def refresh_xg_all_teams():
         conn.commit()
         conn.close()
         updated += 1
-        time.sleep(2)   # polite delay — Understat is free, don't hammer it
-
+        time.sleep(2)
     log.info(f"xG refresh complete: {updated}/{len(teams)} teams updated")
 
 # ── Odds ─────────────────────────────────────────────────────
 
-def fetch_odds(fixture_id, home, away):
-    """Pull H2H + BTTS + Over2.5 odds snapshot at alert time."""
+def fetch_odds(fixture_id, home, away, league="PL"):
+    """Pull h2h + over2.5 odds for a single fixture and store in DB."""
     if not ODDS_API_KEY or ODDS_API_KEY.strip() in ("", "YOUR_ODDS_API_KEY"):
         log.info("Odds API key not set — skipping odds fetch")
         return None
 
+    sport = LEAGUE_ODDS_SPORT.get(league, "soccer_epl")
     result = {}
 
-    # H2H market
-    data_h2h = _get(
-        f"https://api.the-odds-api.com/v4/sports/{ODDS_SPORT}/odds",
-        params={
-            "apiKey":      ODDS_API_KEY,
-            "regions":     ODDS_REGION,
-            "markets":     "h2h",
-            "oddsFormat":  "decimal"
-        },
-        label=f"odds-h2h-{home}v{away}"
-    )
-    if data_h2h:
-        for game in data_h2h:
-            if (home.lower() in game.get("home_team","").lower() or
-                    away.lower() in game.get("away_team","").lower()):
-                for bm in game.get("bookmakers", [])[:1]:
-                    for mkt in bm.get("markets", []):
-                        if mkt["key"] == "h2h":
-                            oc = {o["name"]: o["price"] for o in mkt["outcomes"]}
-                            result["home"] = oc.get(game["home_team"])
-                            result["draw"] = oc.get("Draw")
-                            result["away"] = oc.get(game["away_team"])
-                break
-
-    # BTTS + Over/Under 2.5 markets
-    for market_key, result_key in [("btts", "btts_yes"), ("totals", "over25")]:
-        data_mkt = _get(
-            f"https://api.the-odds-api.com/v4/sports/{ODDS_SPORT}/odds",
+    for market_key in ["h2h", "totals"]:
+        data = _get(
+            f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
             params={
                 "apiKey":     ODDS_API_KEY,
                 "regions":    ODDS_REGION,
@@ -336,22 +330,25 @@ def fetch_odds(fixture_id, home, away):
             },
             label=f"odds-{market_key}-{home}v{away}"
         )
-        if not data_mkt:
+        if not data:
             continue
-        for game in data_mkt:
-            if (home.lower() in game.get("home_team","").lower() or
-                    away.lower() in game.get("away_team","").lower()):
-                for bm in game.get("bookmakers", [])[:1]:
-                    for mkt in bm.get("markets", []):
-                        if mkt["key"] == market_key:
-                            for outcome in mkt["outcomes"]:
-                                name = outcome["name"].lower()
-                                if result_key == "btts_yes" and "yes" in name:
-                                    result["btts_yes"] = outcome["price"]
-                                elif result_key == "over25" and "over" in name:
-                                    result["over25"] = outcome["price"]
-                break
-        time.sleep(0.5)  # stay within free tier rate limit
+
+        for game in data:
+            if not _teams_match(game.get("home_team",""), game.get("away_team",""), home, away):
+                continue
+            for bm in game.get("bookmakers", [])[:1]:
+                for mkt in bm.get("markets", []):
+                    if mkt["key"] == "h2h":
+                        oc = {o["name"]: o["price"] for o in mkt["outcomes"]}
+                        result["home_odds"] = oc.get(game["home_team"])
+                        result["draw_odds"] = oc.get("Draw")
+                        result["away_odds"] = oc.get(game["away_team"])
+                    elif mkt["key"] == "totals":
+                        for o in mkt["outcomes"]:
+                            if "over" in o["name"].lower():
+                                result["over25"] = o["price"]
+            break
+        time.sleep(0.3)
 
     if result:
         conn = _db()
@@ -361,20 +358,47 @@ def fetch_odds(fixture_id, home, away):
             VALUES (?,?,?,?,?,?,?)
         """, (
             fixture_id,
-            result.get("home"), result.get("draw"), result.get("away"),
-            result.get("btts_yes"), result.get("over25"),
+            result.get("home_odds"), result.get("draw_odds"), result.get("away_odds"),
+            None,  # btts not available on free tier
+            result.get("over25"),
             datetime.utcnow().isoformat()
         ))
         conn.commit()
         conn.close()
-        log.info(f"Odds stored for {fixture_id}: {result}")
+        log.info(f"Odds stored [{league}] {home} vs {away}: {result}")
 
     return result if result else None
+
+
+def fetch_odds_for_today():
+    """Proactively fetch and store odds for all of today's scheduled fixtures."""
+    conn = _db()
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    fixtures = conn.execute("""
+        SELECT fixture_id, home, away, league FROM fixtures
+        WHERE date(kickoff_utc)=? AND status IN ('SCHEDULED','TIMED')
+    """, (today,)).fetchall()
+    conn.close()
+
+    total, ok, fail = len(fixtures), 0, 0
+    log.info(f"Proactive odds fetch: {total} fixtures today")
+    for fix in fixtures:
+        try:
+            r = fetch_odds(fix["fixture_id"], fix["home"], fix["away"], fix["league"])
+            if r:
+                ok += 1
+            else:
+                fail += 1
+        except Exception as e:
+            log.warning(f"Odds fetch error {fix['home']} vs {fix['away']}: {e}")
+            fail += 1
+        time.sleep(0.5)
+    log.info(f"Odds fetch complete: {ok} stored, {fail} failed")
+    return ok, fail
 
 # ── Nightly cache rebuild ─────────────────────────────────────
 
 def refresh_all_team_forms():
-    """Compute form for every team that appears in the results table."""
     conn = _db()
     cur = conn.cursor()
     cur.execute("""
@@ -401,6 +425,7 @@ def refresh_all_team_forms():
 
 def nightly_refresh():
     log.info("Nightly cache refresh started")
+    fetch_standings()
     fetch_fixtures(days_ahead=7)
     fetch_results(days_back=3)
     refresh_all_team_forms()
@@ -411,3 +436,59 @@ def nightly_refresh():
     except Exception as e:
         log.warning(f"API-Football refresh error: {e}")
     log.info("Nightly cache refresh complete")
+
+# ── Standings ─────────────────────────────────────────────────
+
+def fetch_standings():
+    """Pull current standings for all configured leagues from football-data.org."""
+    from config import LEAGUE_CODES, FD_API_KEY, FD_BASE_URL
+    headers = {"X-Auth-Token": FD_API_KEY}
+    conn = _db()
+    total = 0
+
+    for league in LEAGUE_CODES:
+        url  = f"{FD_BASE_URL}/competitions/{league}/standings"
+        data = _get(url, headers=headers, label=f"standings-{league}")
+        if not data:
+            log.warning(f"Standings fetch failed for {league}")
+            continue
+
+        try:
+            table = data["standings"][0]["table"]
+        except (KeyError, IndexError) as e:
+            log.warning(f"Standings parse error for {league}: {e}")
+            continue
+
+        for entry in table:
+            raw_name = entry["team"]["name"]
+            team = raw_name
+            for suffix in [" FC", " AFC", " CF", " SC", " AC", " AS", " SD", " UD", " RC"]:
+                if team.endswith(suffix):
+                    team = team[:-len(suffix)].strip()
+                    break
+            conn.execute("""
+                INSERT OR REPLACE INTO standings
+                (team, league, position, played, won, drawn, lost,
+                 goals_for, goals_ag, points, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                team, league,
+                entry["position"],
+                entry["playedGames"],
+                entry["won"],
+                entry["draw"],
+                entry["lost"],
+                entry["goalsFor"],
+                entry["goalsAgainst"],
+                entry["points"],
+                datetime.utcnow().isoformat()
+            ))
+            total += 1
+
+        conn.commit()
+        log.info(f"Standings fetched: {league} ({len(table)} teams)")
+        time.sleep(1)  # football-data.org free tier: 10 req/min
+
+    conn.close()
+    log.info(f"Standings refresh complete: {total} rows written")
+    return total
