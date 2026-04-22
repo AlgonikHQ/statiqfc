@@ -324,11 +324,18 @@ def run_result_checker():
     post_ft_results()
     global _vip_announced
     try:
-        finished     = fetch_results(days_back=1)
+        fetch_results(days_back=1)
+        # fetch_results returns a count, not a list — query finished fixtures directly
+        conn_r = sqlite3.connect(DB_PATH)
+        conn_r.row_factory = sqlite3.Row
+        finished_list = conn_r.execute(
+            "SELECT * FROM fixtures WHERE status='FINISHED'"
+        ).fetchall()
+        conn_r.close()
         pending      = get_pending_selections()
         if not pending:
             return
-        finished_ids = {f["fixture_id"]: f for f in finished}
+        finished_ids = {f["fixture_id"]: f for f in finished_list}
         for sel in pending:
             fid = sel["fixture_id"]
             if fid not in finished_ids:
