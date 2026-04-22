@@ -223,7 +223,7 @@ def run_edge_scan():
         log.error(traceback.format_exc())
 
 
-# ── End of day (21:00 UTC) ────────────────────────────────────
+# ── End of day (22:30 UTC) ────────────────────────────────────
 
 def run_end_of_day():
     global _near_misses, _fixtures_scanned, _top_score, _leagues_scanned
@@ -483,7 +483,7 @@ def main():
     schedule.every(30).minutes.do(run_edge_scan)
     schedule.every(5).minutes.do(run_public_skip_notices)
     schedule.every(30).minutes.do(run_result_checker)
-    schedule.every().day.at("21:00").do(run_end_of_day)
+    schedule.every().day.at("22:30").do(run_end_of_day)
     schedule.every().sunday.at("20:00").do(run_weekly_digest)
     log.info("Scheduler running")
     while True:
