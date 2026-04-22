@@ -140,6 +140,153 @@ def fetch_results(days_back=3):
     log.info(f"Results sync: {inserted} CSV rows ingested, {synced} fixtures marked FINISHED")
     return inserted
 
+
+
+# football-data.org full name → DB short name
+FD_NAME_MAP = {
+    "AFC Bournemouth":           "Bournemouth",
+    "AFC Wimbledon":             "Wimbledon",
+    "Albacete Balompié":         "Albacete",
+    "Athletic Club":             "Athletic Club",
+    "Club Atlético de Madrid":   "Atlético Madrid",
+    "Birmingham City FC":        "Birmingham",
+    "Blackburn Rovers FC":       "Blackburn",
+    "Blackpool FC":              "Blackpool",
+    "Bolton Wanderers FC":       "Bolton",
+    "Brentford FC":              "Brentford",
+    "Brighton & Hove Albion FC": "Brighton",
+    "Bristol City FC":           "Bristol City",
+    "Burnley FC":                "Burnley",
+    "Cardiff City FC":           "Cardiff",
+    "Charlton Athletic FC":      "Charlton",
+    "Chelsea FC":                "Chelsea",
+    "Coventry City FC":          "Coventry",
+    "Crystal Palace FC":         "Crystal Palace",
+    "Derby County FC":           "Derby",
+    "Everton FC":                "Everton",
+    "FC Nantes":                 "Nantes",
+    "FC Barcelona":              "Barcelona",
+    "Fulham FC":                 "Fulham",
+    "Getafe CF":                 "Getafe",
+    "Huddersfield Town AFC":     "Huddersfield",
+    "Hull City AFC":             "Hull",
+    "Ipswich Town FC":           "Ipswich",
+    "Leeds United FC":           "Leeds United",
+    "Leicester City FC":         "Leicester",
+    "Luton Town FC":             "Luton",
+    "Manchester City FC":        "Manchester City",
+    "Manchester United FC":      "Manchester United",
+    "Middlesbrough FC":          "Middlesbrough",
+    "Millwall FC":               "Millwall",
+    "Newcastle United FC":       "Newcastle",
+    "Norwich City FC":           "Norwich",
+    "Nottingham Forest FC":      "Nottingham Forest",
+    "Oxford United FC":          "Oxford",
+    "Paris Saint-Germain FC":    "Paris Saint-Germain",
+    "Plymouth Argyle FC":        "Plymouth",
+    "Portsmouth FC":             "Portsmouth",
+    "Preston North End FC":      "Preston",
+    "Queens Park Rangers FC":    "QPR",
+    "Real Sociedad de Fútbol":   "Real Sociedad",
+    "Rotherham United FC":       "Rotherham",
+    "Sheffield United FC":       "Sheffield United",
+    "Sheffield Wednesday FC":    "Sheffield Wednesday",
+    "Southampton FC":            "Southampton",
+    "Stoke City FC":             "Stoke",
+    "Sunderland AFC":            "Sunderland",
+    "Swansea City AFC":          "Swansea",
+    "Telstar 1963":              "Telstar",
+    "Tottenham Hotspur FC":      "Tottenham",
+    "Watford FC":                "Watford",
+    "West Bromwich Albion FC":   "West Brom",
+    "West Ham United FC":        "West Ham",
+    "Wigan Athletic FC":         "Wigan",
+    "Wolverhampton Wanderers FC":"Wolves",
+}
+
+def fetch_live_results_today():
+    """
+    Fetch today's finished results from football-data.org live API.
+    Called from run_result_checker every 30 min.
+    Updates fixtures to FINISHED and writes to results table.
+    Returns count of fixtures updated.
+    """
+    from difflib import get_close_matches
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        r = requests.get(
+            FD_BASE_URL + "/matches",
+            headers={"X-Auth-Token": FD_API_KEY},
+            params={"status": "FINISHED", "date": today},
+            timeout=15
+        )
+        r.raise_for_status()
+        matches = r.json().get("matches", [])
+    except Exception as e:
+        log.warning(f"fetch_live_results_today error: {e}")
+        return 0
+
+    if not matches:
+        return 0
+
+    conn = _db()
+    updated = 0
+    for m in matches:
+        comp_code = m.get("competition", {}).get("code", "")
+        api_home  = m.get("homeTeam", {}).get("name", "")
+        api_away  = m.get("awayTeam", {}).get("name", "")
+        api_home  = FD_NAME_MAP.get(api_home, api_home)
+        api_away  = FD_NAME_MAP.get(api_away, api_away)
+        ft        = m.get("score", {}).get("fullTime", {})
+        hg        = ft.get("home")
+        ag        = ft.get("away")
+        if hg is None or ag is None:
+            continue
+
+        # Find candidates in fixtures table for this league+date
+        candidates = conn.execute("""
+            SELECT fixture_id, home, away FROM fixtures
+            WHERE league=? AND substr(kickoff_utc,1,10)=?
+        """, (comp_code, today)).fetchall()
+
+        if not candidates:
+            continue
+
+        matched = None
+        for c in candidates:
+            hm = get_close_matches(api_home, [c["home"]], n=1, cutoff=0.5)
+            am = get_close_matches(api_away, [c["away"]], n=1, cutoff=0.5)
+            if hm and am:
+                matched = c
+                break
+
+        if not matched:
+            log.warning(f"No DB match: {api_home} vs {api_away} [{comp_code}]")
+            continue
+
+        fid      = matched["fixture_id"]
+        db_home  = matched["home"]
+        db_away  = matched["away"]
+
+        conn.execute("""
+            UPDATE fixtures SET status='FINISHED', home_score=?, away_score=?, updated_at=?
+            WHERE fixture_id=? AND status IN ('SCHEDULED','TIMED','IN_PLAY')
+        """, (hg, ag, datetime.utcnow().isoformat(), fid))
+
+        match_id = f"{today}_{db_home}_{db_away}".replace(" ", "_")
+        conn.execute("""
+            INSERT OR REPLACE INTO results (match_id, league, season, date, home, away, fthg, ftag)
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (match_id, comp_code, "2025-26", today, db_home, db_away, hg, ag))
+
+        updated += 1
+        log.info(f"Live result: {db_home} {hg}-{ag} {db_away} [{comp_code}]")
+
+    conn.commit()
+    conn.close()
+    return updated
+
 def fetch_team_form(team_id, team_name):
     conn = _db()
     cur = conn.cursor()

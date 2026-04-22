@@ -19,7 +19,7 @@ from config import (DIGEST_TIME, CACHE_REFRESH_TIME, PRE_MATCH_HOURS,
 from database  import (init_db, log_selection, settle_selection,
                        get_pending_selections, get_latest_roi, refresh_roi,
                        export_roi_json, count_today_alerts)
-from fetcher   import nightly_refresh, fetch_fixtures, fetch_results, fetch_h2h, fetch_odds
+from fetcher   import nightly_refresh, fetch_fixtures, fetch_results, fetch_h2h, fetch_odds, fetch_live_results_today
 from scanner   import scan_today, score_btts, score_clean_sheet, score_over25
 from telegram_cards import (
     buttons_edge_alert, buttons_result, buttons_digest, buttons_weekly, buttons_vip,
@@ -324,8 +324,8 @@ def run_result_checker():
     post_ft_results()
     global _vip_announced
     try:
-        fetch_results(days_back=1)
-        # fetch_results returns a count, not a list — query finished fixtures directly
+        fetch_live_results_today()
+        # fetch_live_results_today uses API-Football for same-day results (live)
         conn_r = sqlite3.connect(DB_PATH)
         conn_r.row_factory = sqlite3.Row
         finished_list = conn_r.execute(
@@ -497,6 +497,7 @@ def main():
     schedule.every(30).minutes.do(run_result_checker)
     schedule.every().day.at("22:30").do(run_end_of_day)
     schedule.every().sunday.at("20:00").do(run_weekly_digest)
+    run_result_checker()
     log.info("Scheduler running")
     while True:
         try:

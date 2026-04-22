@@ -23,16 +23,19 @@ HEADERS = {
 # Map our league codes to API-Football league IDs
 LEAGUE_ID_MAP = {
     "PL":  39,    # Premier League
+    "ELC": 40,    # Championship
     "BL1": 78,    # Bundesliga
     "SA":  135,   # Serie A
     "FL1": 61,    # Ligue 1
     "PD":  140,   # La Liga
+    "DED": 88,    # Eredivisie
+    "PPL": 94,    # Primeira Liga
     "CL":  2,     # Champions League
     "EC":  4,     # Euros
     "WC":  1,     # World Cup
 }
 
-CURRENT_SEASON = 2024  # update each season
+CURRENT_SEASON = 2025  # update each season
 
 def _get(endpoint, params=None):
     """Single API-Football GET with rate limit awareness."""
@@ -261,6 +264,105 @@ def build_team_id_map():
 
     conn.close()
     log.info("Team ID map build complete")
+
+
+# ── Live same-day result fetcher ─────────────────────────────
+
+def fetch_live_results_today():
+    """
+    Fetch today's finished results from API-Football.
+    Called from run_result_checker every 30 min.
+    Matches by league+date, fuzzy team name match.
+    Updates fixtures to FINISHED and writes to results table.
+    Returns count of fixtures updated.
+    """
+    from difflib import get_close_matches
+    from datetime import datetime, timezone
+    import sqlite3
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    conn = _db()
+
+    # Find leagues that have SCHEDULED fixtures today
+    leagues_today = conn.execute("""
+        SELECT DISTINCT league FROM fixtures
+        WHERE substr(kickoff_utc,1,10) = ?
+          AND status IN ('SCHEDULED','TIMED','IN_PLAY')
+          AND kickoff_utc <= datetime('now', '-95 minutes')
+    """, (today,)).fetchall()
+
+    if not leagues_today:
+        conn.close()
+        return 0
+
+    updated = 0
+    for row in leagues_today:
+        league_code = row["league"]
+        league_id = LEAGUE_ID_MAP.get(league_code)
+        if not league_id:
+            continue
+
+        data = _get("fixtures", {"league": league_id, "season": CURRENT_SEASON, "date": today})
+        if not data:
+            time.sleep(1)
+            continue
+
+        for fix in data:
+            status_short = fix.get("fixture", {}).get("status", {}).get("short", "")
+            if status_short not in ("FT", "AET", "PEN"):
+                continue
+
+            api_home = fix.get("teams", {}).get("home", {}).get("name", "")
+            api_away = fix.get("teams", {}).get("away", {}).get("name", "")
+            hg = fix.get("goals", {}).get("home")
+            ag = fix.get("goals", {}).get("away")
+            if hg is None or ag is None:
+                continue
+
+            # Find matching fixture in DB by league+date, fuzzy name match
+            candidates = conn.execute("""
+                SELECT fixture_id, home, away FROM fixtures
+                WHERE league=? AND substr(kickoff_utc,1,10)=?
+                  AND status IN ('SCHEDULED','TIMED','IN_PLAY','FINISHED')
+            """, (league_code, today)).fetchall()
+
+            matched = None
+            for c in candidates:
+                home_match = get_close_matches(api_home, [c["home"]], n=1, cutoff=0.6)
+                away_match = get_close_matches(api_away, [c["away"]], n=1, cutoff=0.6)
+                if home_match and away_match:
+                    matched = c
+                    break
+
+            if not matched:
+                log.warning(f"No DB match for API-Football: {api_home} vs {api_away} [{league_code}]")
+                continue
+
+            fid = matched["fixture_id"]
+            db_home = matched["home"]
+            db_away = matched["away"]
+
+            # Update fixture status
+            conn.execute("""
+                UPDATE fixtures SET status='FINISHED', home_score=?, away_score=?, updated_at=?
+                WHERE fixture_id=? AND status IN ('SCHEDULED','TIMED','IN_PLAY')
+            """, (hg, ag, datetime.utcnow().isoformat(), fid))
+
+            # Upsert into results table
+            match_id = f"{today}_{db_home}_{db_away}".replace(" ", "_")
+            conn.execute("""
+                INSERT OR REPLACE INTO results (match_id, league, date, home, away, fthg, ftag)
+                VALUES (?,?,?,?,?,?,?)
+            """, (match_id, league_code, today, db_home, db_away, hg, ag))
+
+            updated += conn.execute("SELECT changes()").fetchone()[0]
+            log.info(f"Live result: {db_home} {hg}-{ag} {db_away} [{league_code}]")
+
+        time.sleep(1)
+
+    conn.commit()
+    conn.close()
+    return updated
 
 # ── Nightly refresh entry point ───────────────────────────────
 
