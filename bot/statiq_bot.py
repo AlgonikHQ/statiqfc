@@ -185,7 +185,20 @@ def run_edge_scan():
                         next_ko
                     ))
 
+        # Dedup: load already-alerted fixture+market combos from selections table
+        conn_d = sqlite3.connect(DB_PATH)
+        alerted_ids = {
+            (row[0], row[1])
+            for row in conn_d.execute(
+                "SELECT fixture_id, market FROM selections"
+            ).fetchall()
+        }
+        conn_d.close()
+
         for edge in edges:
+            if (edge["fixture_id"], edge["market"]) in alerted_ids:
+                log.info(f"Dedup skip: {edge['home']} vs {edge['away']} [{edge['market']}] already alerted")
+                continue
             h2h_rows = fetch_h2h(edge["fixture_id"])
             odds     = fetch_odds(edge["fixture_id"], edge["home"], edge["away"])
 
