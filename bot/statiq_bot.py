@@ -18,13 +18,13 @@ from config import (DIGEST_TIME, CACHE_REFRESH_TIME, PRE_MATCH_HOURS,
                     STAKE_BUILDER, STAKE_STANDARD, LEAGUE_CODES, MIN_SCORE_TO_ALERT)
 from database  import (init_db, log_selection, settle_selection,
                        get_pending_selections, get_latest_roi, refresh_roi,
-                       export_roi_json, count_today_alerts)
+                       export_roi_json, count_today_alerts, refresh_daily_pnl)
 from fetcher   import nightly_refresh, fetch_fixtures, fetch_results, fetch_h2h, fetch_odds, fetch_live_results_today
 from scanner   import scan_today, score_btts, score_clean_sheet, score_over25
 from telegram_cards import (
     buttons_edge_alert, buttons_result, buttons_digest, buttons_weekly, buttons_vip,
     card_daily_digest, card_edge_alert, card_result, card_no_alerts_today,
-    card_weekly_digest, card_vip_unlock, card_fixture_skip, card_public_skip, card_public_ft_result, card_public_eod_summary,
+    card_weekly_digest, card_vip_unlock, card_fixture_skip, card_public_skip, card_public_ft_result, card_public_ft_results_block, card_public_eod_summary,
     card_private_startup, card_private_morning_briefing, card_private_alert_detail,
     card_private_near_misses, card_private_nightly_report, card_private_roi_summary,
     card_private_error
@@ -250,6 +250,51 @@ def run_end_of_day():
         today    = refresh_daily_pnl()
         alltime  = get_alltime_stats()
 
+        # Post today's results as one consolidated block
+        try:
+            conn = __import__('sqlite3').connect(DB_PATH)
+            conn.row_factory = __import__('sqlite3').Row
+            today_date = __import__('datetime').datetime.utcnow().strftime('%Y-%m-%d')
+            rows = conn.execute("""
+                SELECT r.match_id, r.league, r.home, r.away, r.fthg, r.ftag
+                FROM results r
+                LEFT JOIN public_result_sent p ON p.match_id = r.match_id
+                WHERE p.match_id IS NULL
+                  AND r.date = ?
+                  AND r.fthg IS NOT NULL AND r.ftag IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1 FROM fixtures f
+                    WHERE f.home = r.home AND f.away = r.away
+                      AND substr(f.kickoff_utc,1,10) = r.date
+                  )
+                ORDER BY r.league, r.home
+            """, (today_date,)).fetchall()
+            if rows:
+                now_iso = __import__('datetime').datetime.utcnow().isoformat()
+                result_list = []
+                for row in rows:
+                    sel = conn.execute("""
+                        SELECT result FROM selections
+                        WHERE home=? AND away=? AND substr(created_at,1,10)=?
+                        ORDER BY id DESC LIMIT 1
+                    """, (row["home"], row["away"], today_date)).fetchone()
+                    result_list.append({
+                        "home": row["home"], "away": row["away"],
+                        "fthg": row["fthg"], "ftag": row["ftag"],
+                        "league": row["league"],
+                        "was_edge": sel is not None,
+                        "edge_result": sel["result"] if sel else None
+                    })
+                    conn.execute(
+                        "INSERT OR REPLACE INTO public_result_sent (match_id, sent_at) VALUES (?, ?)",
+                        (row["match_id"], now_iso)
+                    )
+                conn.commit()
+                send_public(card_public_ft_results_block(result_list))
+            conn.close()
+        except Exception as e:
+            send_private(card_private_error("eod_results_block", e))
+
         # Always post EOD summary to public channel
         send_public_buttons(
             card_public_eod_summary(today, alltime, _leagues_scanned),
@@ -333,8 +378,6 @@ def post_ft_results():
 
 
 def run_result_checker():
-    # Post any new FT results to public channel
-    post_ft_results()
     global _vip_announced
     try:
         fetch_live_results_today()

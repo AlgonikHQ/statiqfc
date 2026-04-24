@@ -10,3 +10,4 @@ bot/statiqfc.db
 __pycache__/
 *.pyc
 *.pyo
+dashboard/roi.json

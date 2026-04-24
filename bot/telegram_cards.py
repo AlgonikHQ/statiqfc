@@ -599,3 +599,32 @@ def _private_roi_summary(roi, label="Daily ROI Summary"):
 
 def _private_nightly_cache_card(ok):
     return card_private_nightly_report(ok, {"football-data.org": ok, "Understat": ok, "API-Football": ok})
+
+def card_public_ft_results_block(results):
+    """Single consolidated FT results block for EOD. results = list of dicts with home/away/fthg/ftag/league/was_edge/edge_result."""
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        date_str = datetime.now(ZoneInfo("Europe/London")).strftime("%d %b %Y")
+    except Exception:
+        date_str = datetime.utcnow().strftime("%d %b %Y")
+
+    lines = [
+        "\u23f1 *Today\u2019s Results \u2014 " + date_str + "*",
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+    ]
+    current_league = None
+    for r in results:
+        league_label = _league_label(r.get("league", "PL"))
+        if league_label != current_league:
+            lines.append("\n" + league_label)
+            current_league = league_label
+        score_line = "\u2022 " + r["home"] + " *" + str(r["fthg"]) + "\u2013" + str(r["ftag"]) + "* " + r["away"]
+        if r.get("was_edge") and r.get("edge_result"):
+            emoji = {"WIN": "\u2705", "LOSS": "\u274c", "VOID": "\u21a9\ufe0f"}.get(r["edge_result"], "")
+            score_line += "  " + emoji + " _" + r["edge_result"] + "_"
+        lines.append(score_line)
+
+    lines.append("\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+    lines.append("_Powered by StatiqFC_")
+    return "\n".join(lines)
