@@ -23,13 +23,13 @@ from fetcher   import nightly_refresh, fetch_fixtures, fetch_results, fetch_h2h,
 from scanner   import scan_today, score_btts, score_clean_sheet, score_over25
 from telegram_cards import (
     buttons_edge_alert, buttons_result, buttons_digest, buttons_weekly, buttons_vip,
-    card_daily_digest, card_edge_alert, card_result, card_no_alerts_today,
+    card_daily_digest, card_edge_alert, card_result, card_no_alerts_today, card_morning_no_fixtures,
     card_weekly_digest, card_vip_unlock, card_fixture_skip, card_public_skip, card_public_ft_result, card_public_ft_results_block, card_public_eod_summary,
     card_private_startup, card_private_morning_briefing, card_private_alert_detail,
     card_private_near_misses, card_private_nightly_report, card_private_roi_summary,
     card_private_error
 )
-from telegram import send_public, send_private, send_public_buttons
+from telegram import send_public, send_private, send_public_buttons, send_vip, send_vip_buttons
 
 logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
                     format="%(asctime)s [MAIN] %(message)s")
@@ -97,6 +97,9 @@ def run_daily_digest():
         if fixtures:
             send_public_buttons(card_daily_digest(fixtures), buttons_digest())
             send_private(card_private_morning_briefing(fixtures, BOT_VERSION))
+        else:
+            send_public_buttons(card_morning_no_fixtures(), buttons_digest())
+            send_private(card_morning_no_fixtures())
         log.info("Daily digest: " + str(len(fixtures)) + " fixtures")
     except Exception as e:
         send_private(card_private_error("run_daily_digest", e))
@@ -232,7 +235,7 @@ def run_edge_scan():
 
             msg = card_edge_alert(edge, _to_form_dict(fh), _to_form_dict(fa),
                                   h2h_rows, odds, BOT_VERSION)
-            send_public_buttons(msg, buttons_edge_alert(edge["home"], edge["away"]))
+            send_vip_buttons(msg, buttons_edge_alert(edge["home"], edge["away"]))
             send_private(card_private_alert_detail(edge, BOT_VERSION))
             log.info("Alert: " + edge["home"] + " vs " + edge["away"] + " [" + edge["market"] + "] score " + str(edge.get("score_str")))
 
@@ -421,7 +424,7 @@ def run_result_checker():
             if (not _vip_announced and roi and
                     roi["selections"] >= VIP_MIN_SELECTIONS and
                     roi["roi_pct"] >= VIP_ROI_TARGET):
-                send_public_buttons(card_vip_unlock(roi), buttons_vip())
+                send_private(card_vip_unlock(roi))
                 send_private("\U0001f3c6 *VIP threshold hit!*\nROI: " + str(roi["roi_pct"]) + "% over " + str(roi["selections"]) + " selections.")
                 _vip_announced = True
     except Exception as e:
@@ -524,7 +527,7 @@ def run_public_skip_notices():
             if fid in edged_ids:
                 continue  # Fixture has edge — handled by run_edge_scan
             # No edge — post clean public skip
-            send_public(card_public_skip(
+            send_vip(card_public_skip(
                 fix["home"], fix["away"],
                 fix.get("league", "PL"),
                 fix["kickoff_utc"]
