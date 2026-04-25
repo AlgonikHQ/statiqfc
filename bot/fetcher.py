@@ -195,6 +195,8 @@ FD_NAME_MAP = {
     "Stoke City FC":             "Stoke",
     "Sunderland AFC":            "Sunderland",
     "Swansea City AFC":          "Swansea",
+    "Stade Brestois 29":         "Brest",
+    "Racing Club de Lens":       "Lens",
     "Telstar 1963":              "Telstar",
     "Tottenham Hotspur FC":      "Tottenham",
     "Watford FC":                "Watford",
