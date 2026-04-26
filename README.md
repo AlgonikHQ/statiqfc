@@ -2,7 +2,7 @@
 
 Automated football edge detection across 8 European leagues. Paper staked in units. Full ROI tracked transparently. No hype, just data.
 
-**Current version:** v2.1 (engine v1.6)
+**Current version:** v2.2 (engine v1.6)
 **Status:** Live — first edge fired 22 Apr 2026
 
 ---
@@ -49,19 +49,24 @@ Champions League intentionally excluded — too much noise, inconsistent form co
 
 ## The subscriber experience
 
-Public Telegram channel delivers:
+**Public channel** delivers:
 
 | Time | Message |
 |---|---|
-| 07:00 daily | Morning fixture card — all today's games grouped by league |
-| T-2hrs pre-KO | Edge alert card with buttons if a pick scores 4+/6 |
-| T-30 min pre-KO | Clean skip notice if no edge found for a fixture |
+| 09:00 BST daily | Morning fixture card — all today's games grouped by league |
 | Post-FT | FT result card — includes outcome if we had an edge |
 | 22:30 daily | End-of-day summary — today's W/L/ROI + all-time running stats |
 | Sunday 20:00 | Weekly digest |
+
+**VIP channel** delivers:
+
+| Time | Message |
+|---|---|
+| T-2hrs pre-KO | Edge alert card with buttons if a pick scores 4+/6 |
+| T-30 min pre-KO | Skip notice if no edge found for a fixture |
 | On target | VIP unlock announcement |
 
-Everything else — restart notifications, error logs, verbose per-fixture scoring, near-misses — routed to a private channel. Subscribers see a clean, professional feed.
+Everything else — restart notifications, error logs, verbose per-fixture scoring, near-misses — routed to a private admin channel. Subscribers see a clean, professional feed.
 
 ---
 
@@ -72,7 +77,7 @@ Everything else — restart notifications, error logs, verbose per-fixture scori
 | Standard edge | **1u** |
 | Builder single | **0.5u** |
 
-**VIP threshold:** +20% ROI over 50 settled selections.
+**VIP threshold:** +8% ROI over 100 settled selections.
 
 ---
 
@@ -81,7 +86,7 @@ Everything else — restart notifications, error logs, verbose per-fixture scori
 | Source | Used for |
 |---|---|
 | [football-data.co.uk](https://www.football-data.co.uk) | Historical results, form, H2H, upcoming fixtures |
-| [football-data.org](https://www.football-data.org) | League standings (all 8 leagues, free tier) |
+| [football-data.org](https://www.football-data.org) | Live same-day results + league standings (all 8 leagues, free tier) |
 | [Understat](https://understat.com) | xG per team (scraped, top 5 leagues) |
 | [The Odds API](https://the-odds-api.com) | Live odds — h2h + over/under markets (free tier) |
 
@@ -92,8 +97,8 @@ The bot holds **8,392 historical matches** seeding form and H2H computation from
 ## Stack
 
 - Python 3.12 on Ubuntu 24.04 (Hetzner VPS)
-- SQLite local cache (`cache.db`)
-- `schedule` library for job orchestration
+- SQLite local cache (cache.db)
+- schedule library for job orchestration
 - Telegram Bot API for delivery
 - systemd service management
 - GitHub for version control
@@ -105,22 +110,24 @@ The bot holds **8,392 historical matches** seeding form and H2H computation from
 | Job | Frequency |
 |---|---|
 | Nightly cache refresh (fixtures, results, form, standings, xG) | 00:00 daily |
-| Morning digest | 07:00 daily |
+| Morning digest | 09:00 BST daily |
 | Edge scan (with live odds + H2H pre-fetch) | Every 30 min |
 | Public skip notices | Every 5 min |
-| Result checker + FT poster | Every 30 min |
+| Result checker + FT poster (live API) | Every 30 min |
 | End-of-day summary | 22:30 daily |
 | Weekly digest | Sunday 20:00 |
 
 ---
 
 ## Project structure
+
 statiq/
 ├── bot/
 │   ├── config.py            # constants + credentials (gitignored)
 │   ├── database.py          # SQLite schema + helpers
 │   ├── fetcher.py           # data fetch layer — results, form, standings, odds
 │   ├── fetcher_fbcouk.py    # football-data.co.uk CSV ingestion
+│   ├── apifootball.py       # API-Football standings + nightly refresh
 │   ├── scanner.py           # 6-layer edge scoring engine
 │   ├── telegram_cards.py    # message templates
 │   ├── telegram.py          # Telegram send helpers
@@ -129,12 +136,13 @@ statiq/
 ├── data/
 │   └── cache.db             # SQLite store (gitignored)
 └── README.md
+
 ---
 
 ## Transparency
 
 - Every selection logged with reasoning, odds, stake, and settlement
-- Daily P&L snapshots in `daily_pnl` table
+- Daily P&L snapshots in daily_pnl table
 - All-time ROI computed from settled selections only
 - No historical editing — paper record is the record
 
@@ -142,8 +150,8 @@ statiq/
 
 ## Disclaimer
 
-StatiqFC is a statistical data service. It does not provide financial or betting advice. All displayed stakes are paper only — no real money is placed. 18+. Gamble responsibly. [BeGambleAware.org](https://www.begambleaware.org)
+StatiqFC is a statistical data service. It does not provide financial or betting advice. All displayed stakes are paper only — no real money is placed. 18+. Gamble responsibly. BeGambleAware.org
 
 ---
 
-*Built by [@AlgonikHQ](https://x.com/AlgonikHQ) — same operator behind a live forex and crypto algo trading stack. FIRE@45 journey documented publicly.*
+*Built by @AlgonikHQ — same operator behind a live forex and crypto algo trading stack. FIRE@45 journey documented publicly.*
