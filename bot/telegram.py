@@ -4,7 +4,7 @@
 
 import requests
 import logging
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PRIVATE_ID, LOG_PATH
+from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PRIVATE_ID, TELEGRAM_VIP_ID, LOG_PATH
 
 logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
                     format="%(asctime)s [TELEGRAM] %(message)s")
@@ -57,3 +57,25 @@ def send_private(text, parse_mode="Markdown"):
 def send(text, parse_mode="Markdown", chat_id=None):
     """Legacy helper — defaults to public."""
     return _send(text, chat_id or TELEGRAM_CHAT_ID, parse_mode)
+
+def send_vip(text, parse_mode="Markdown"):
+    """VIP channel — paid tier picks, deep dives, live edge alerts."""
+    return _send(text, TELEGRAM_VIP_ID, parse_mode)
+
+def send_vip_buttons(text, buttons, parse_mode="Markdown"):
+    """Send to VIP channel with inline URL buttons."""
+    try:
+        keyboard = {"inline_keyboard": buttons}
+        r = requests.post(f"{BASE_URL}/sendMessage", json={
+            "chat_id":    TELEGRAM_VIP_ID,
+            "text":       text,
+            "parse_mode": parse_mode,
+            "reply_markup": keyboard,
+            "disable_web_page_preview": True
+        }, timeout=10)
+        r.raise_for_status()
+        log.info(f"Sent+buttons to VIP {TELEGRAM_VIP_ID} ({len(text)} chars)")
+        return True
+    except Exception as e:
+        log.error(f"Telegram VIP button send failed: {e}")
+        return False
